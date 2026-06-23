@@ -1,0 +1,8 @@
+2026-06-23 17:18:08,013 - AFC is enabled with max remote calls: 10.
+2026-06-23 17:18:08,370 - HTTP Request: POST https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite:streamGenerateContent?alt=sse "HTTP/1.1 400 Bad Request"
+2026-06-23 17:18:08,371 - Gemini API error: 400 FAILED_PRECONDITION. {'error': {'code': 400, 'message': 'User location is not supported for the API use.', 'status': 'FAILED_PRECONDITION'}}
+2026-06-23 17:18:08,371 - Session:  | User: привет | Bot: ...
+2026-06-23 17:25:08,072 - AFC is enabled with max remote calls: 10.
+2026-06-23 17:25:08,438 - HTTP Request: POST https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite:streamGenerateContent?alt=sse "HTTP/1.1 400 Bad Request"
+2026-06-23 17:25:08,460 - Gemini API error: 400 FAILED_PRECONDITION. {'error': {'code': 400, 'message': 'User location is not supported for the API use.', 'status': 'FAILED_PRECONDITION'}}
+2026-06-23 17:25:08,505 - Session: шалапай | User: привет пес | Bot: ...

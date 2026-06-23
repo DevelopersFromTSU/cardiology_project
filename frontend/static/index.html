@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <title>RAG Chat</title>
+    <style>
+        body { font-family: Arial; max-width: 800px; margin: 20px auto; }
+        #chatbox { border:1px solid #ccc; height:400px; overflow-y:scroll; padding:10px; margin-bottom:10px; }
+        .msg { margin:5px 0; }
+        .user { color:blue; }
+        .bot { color:green; }
+        input, select, button { padding:8px; margin:5px; }
+    </style>
+</head>
+<body>
+    <h2>Чат с RAG (Gemini)</h2>
+    <div>
+        <label>Сессия:</label>
+        <select id="sessionSelect" onchange="switchSession()">
+            <option value="default">default</option>
+        </select>
+        <button onclick="newSession()">Новая сессия</button>
+        <button onclick="loadLogs()">Логи</button>
+    </div>
+    <div id="chatbox"></div>
+    <div>
+        <input type="text" id="userInput" placeholder="Введите сообщение..." style="width:70%">
+        <button onclick="sendMessage()">Отправить</button>
+    </div>
+
+    <script>
+        let currentSession = 'default';
+        const chatbox = document.getElementById('chatbox');
+        const sessionSelect = document.getElementById('sessionSelect');
+
+        // Загрузка списка сессий
+        async function loadSessions() {
+            const res = await fetch('/sessions');
+            const data = await res.json();
+            sessionSelect.innerHTML = '';
+            data.sessions.forEach(s => {
+                const option = document.createElement('option');
+                option.value = s;
+                option.text = s;
+                sessionSelect.appendChild(option);
+            });
+        }
+
+        // Переключение сессии
+        async function switchSession() {
+            currentSession = sessionSelect.value;
+            chatbox.innerHTML = '';
+            const res = await fetch(`/history/${currentSession}`);
+            const history = await res.json();
+            history.forEach(msg => {
+                addMessage(msg.role, msg.content);
+            });
+        }
+
+        // Новая сессия
+        function newSession() {
+            const name = prompt('Название сессии:');
+            if(name) {
+                sessionSelect.innerHTML += `<option value="${name}">${name}</option>`;
+                sessionSelect.value = name;
+                switchSession();
+            }
+        }
+
+        // Добавление сообщения в чат
+        function addMessage(role, content) {
+            const div = document.createElement('div');
+            div.className = 'msg ' + (role === 'user' ? 'user' : 'bot');
+            div.textContent = (role === 'user' ? 'Вы: ' : 'Бот: ') + content;
+            chatbox.appendChild(div);
+            chatbox.scrollTop = chatbox.scrollHeight;
+        }
+
+        // Отправка сообщения с SSE
+        async function sendMessage() {
+            const input = document.getElementById('userInput');
+            const message = input.value.trim();
+            if(!message) return;
+            input.value = '';
+
+            addMessage('user', message);
+
+            const response = await fetch('/chat', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({message, session_id: currentSession})
+            });
+
+            const reader = response.body.getReader();
+            const decoder = new TextDecoder();
+            let botDiv = null;
+            let botContent = '';
+
+            while(true) {
+                const {done, value} = await reader.read();
+                if(done) break;
+                const chunk = decoder.decode(value);
+                const lines = chunk.split('\n');
+                for(let line of lines) {
+                    if(line.startsWith('data: ')) {
+                        const data = line.slice(6);
+                        if(data === '[DONE]') break;
+                        const parsed = JSON.parse(data);
+                        if(!botDiv) {
+                            botDiv = document.createElement('div');
+                            botDiv.className = 'msg bot';
+                            botDiv.textContent = 'Бот: ';
+                            chatbox.appendChild(botDiv);
+                        }
+                        botContent += parsed.token;
+                        botDiv.textContent = 'Бот: ' + botContent;
+                        chatbox.scrollTop = chatbox.scrollHeight;
+                    }
+                }
+            }
+        }
+
+        // Загрузка и отображение логов
+        async function loadLogs() {
+            const w = window.open('', '_blank');
+            const res = await fetch('/logs');
+            const text = await res.text();
+            w.document.write('<pre>' + text + '</pre>');
+        }
+
+        // Инициализация
+        window.onload = async () => {
+            await loadSessions();
+            await switchSession();
+        };
+    </script>
+</body>
+</html>
