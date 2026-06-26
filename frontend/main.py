@@ -13,8 +13,8 @@ from google import genai
 from google.genai import types
 
 # ------------------- Настройки -------------------
-GEMINI_API_KEY = "AIzaSyAuVQTtzvTqWAbJhtSb3tVdCFOa9sNqpWk"
-MODEL_NAME = "gemini-3.1-flash-lite"
+GEMINI_API_KEY = "AIzaSyDI32gW0JbKy1ciAjMfiQC1qaDt-FPU8Mg"
+MODEL_NAME = "gemini-2.5-flash"
 client = genai.Client(api_key=GEMINI_API_KEY)
 
 app = FastAPI()

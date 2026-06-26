@@ -6,3 +6,47 @@
 2026-06-23 17:25:08,438 - HTTP Request: POST https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite:streamGenerateContent?alt=sse "HTTP/1.1 400 Bad Request"
 2026-06-23 17:25:08,460 - Gemini API error: 400 FAILED_PRECONDITION. {'error': {'code': 400, 'message': 'User location is not supported for the API use.', 'status': 'FAILED_PRECONDITION'}}
 2026-06-23 17:25:08,505 - Session: ������� | User: ������ ��� | Bot: ...
+2026-06-26 14:37:19,726 - AFC is enabled with max remote calls: 10.
+2026-06-26 14:37:20,096 - HTTP Request: POST https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite:streamGenerateContent?alt=sse "HTTP/1.1 400 Bad Request"
+2026-06-26 14:37:20,097 - Gemini API error: 400 FAILED_PRECONDITION. {'error': {'code': 400, 'message': 'User location is not supported for the API use.', 'status': 'FAILED_PRECONDITION'}}
+2026-06-26 14:37:20,097 - Session: Тест1 | User: здарова | Bot: ...
+2026-06-26 14:38:34,986 - AFC is enabled with max remote calls: 10.
+2026-06-26 14:38:35,272 - HTTP Request: POST https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite:streamGenerateContent?alt=sse "HTTP/1.1 400 Bad Request"
+2026-06-26 14:38:35,273 - Gemini API error: 400 FAILED_PRECONDITION. {'error': {'code': 400, 'message': 'User location is not supported for the API use.', 'status': 'FAILED_PRECONDITION'}}
+2026-06-26 14:38:35,274 - Session: Тест1 | User: здарова | Bot: ...
+2026-06-26 14:39:19,749 - AFC is enabled with max remote calls: 10.
+2026-06-26 14:39:20,017 - HTTP Request: POST https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite:streamGenerateContent?alt=sse "HTTP/1.1 400 Bad Request"
+2026-06-26 14:39:20,018 - Gemini API error: 400 FAILED_PRECONDITION. {'error': {'code': 400, 'message': 'User location is not supported for the API use.', 'status': 'FAILED_PRECONDITION'}}
+2026-06-26 14:39:20,019 - Session: Тест1 | User: здарова | Bot: ...
+2026-06-26 14:40:06,077 - AFC is enabled with max remote calls: 10.
+2026-06-26 14:40:06,349 - HTTP Request: POST https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite:streamGenerateContent?alt=sse "HTTP/1.1 400 Bad Request"
+2026-06-26 14:40:06,350 - Gemini API error: 400 FAILED_PRECONDITION. {'error': {'code': 400, 'message': 'User location is not supported for the API use.', 'status': 'FAILED_PRECONDITION'}}
+2026-06-26 14:40:06,351 - Session: Тест1 | User: привет | Bot: ...
+2026-06-26 14:40:14,035 - AFC is enabled with max remote calls: 10.
+2026-06-26 14:40:14,287 - HTTP Request: POST https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite:streamGenerateContent?alt=sse "HTTP/1.1 400 Bad Request"
+2026-06-26 14:40:14,288 - Gemini API error: 400 FAILED_PRECONDITION. {'error': {'code': 400, 'message': 'User location is not supported for the API use.', 'status': 'FAILED_PRECONDITION'}}
+2026-06-26 14:40:14,289 - Session: Тест1 | User: привет | Bot: ...
+2026-06-26 14:40:37,972 - AFC is enabled with max remote calls: 10.
+2026-06-26 14:40:38,270 - HTTP Request: POST https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite:streamGenerateContent?alt=sse "HTTP/1.1 400 Bad Request"
+2026-06-26 14:40:38,271 - Gemini API error: 400 FAILED_PRECONDITION. {'error': {'code': 400, 'message': 'User location is not supported for the API use.', 'status': 'FAILED_PRECONDITION'}}
+2026-06-26 14:40:38,272 - Session: Тест1 | User: привет | Bot: ...
+2026-06-26 14:42:30,249 - AFC is enabled with max remote calls: 10.
+2026-06-26 14:42:30,870 - HTTP Request: POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse "HTTP/1.1 400 Bad Request"
+2026-06-26 14:42:30,871 - Gemini API error: 400 FAILED_PRECONDITION. {'error': {'code': 400, 'message': 'User location is not supported for the API use.', 'status': 'FAILED_PRECONDITION'}}
+2026-06-26 14:42:30,872 - Session: Тест1 | User: привет | Bot: ...
+2026-06-26 14:44:17,408 - AFC is enabled with max remote calls: 10.
+2026-06-26 14:44:17,682 - HTTP Request: POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse "HTTP/1.1 400 Bad Request"
+2026-06-26 14:44:17,683 - Gemini API error: 400 FAILED_PRECONDITION. {'error': {'code': 400, 'message': 'User location is not supported for the API use.', 'status': 'FAILED_PRECONDITION'}}
+2026-06-26 14:44:17,684 - Session: Тест1 | User: привет | Bot: ...
+2026-06-26 14:44:59,200 - AFC is enabled with max remote calls: 10.
+2026-06-26 14:44:59,461 - HTTP Request: POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse "HTTP/1.1 400 Bad Request"
+2026-06-26 14:44:59,461 - Gemini API error: 400 FAILED_PRECONDITION. {'error': {'code': 400, 'message': 'User location is not supported for the API use.', 'status': 'FAILED_PRECONDITION'}}
+2026-06-26 14:44:59,462 - Session: Тест1 | User: привет | Bot: ...
+2026-06-26 14:45:22,073 - AFC is enabled with max remote calls: 10.
+2026-06-26 14:45:22,387 - HTTP Request: POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse "HTTP/1.1 400 Bad Request"
+2026-06-26 14:45:22,388 - Gemini API error: 400 FAILED_PRECONDITION. {'error': {'code': 400, 'message': 'User location is not supported for the API use.', 'status': 'FAILED_PRECONDITION'}}
+2026-06-26 14:45:22,392 - Session: Тест1 | User: привет | Bot: ...
+2026-06-26 14:46:49,546 - AFC is enabled with max remote calls: 10.
+2026-06-26 14:46:49,821 - HTTP Request: POST https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse "HTTP/1.1 400 Bad Request"
+2026-06-26 14:46:49,821 - Gemini API error: 400 FAILED_PRECONDITION. {'error': {'code': 400, 'message': 'User location is not supported for the API use.', 'status': 'FAILED_PRECONDITION'}}
+2026-06-26 14:46:49,822 - Session: Тест1 | User: привет | Bot: ...
