@@ -21,35 +21,67 @@ def save_chunk_to_folder(chunk_data, filename, folder_name):
     print(f"✅ Результат сохранен: {file_path}")
 
 
-def inject_vision_data(md_text, pil_images):
-    for pil_img in pil_images:
-        description = describe_image(pil_img)
-        replacement = f"\n\n{description}\n\n"
-        md_text = re.sub(r"!\[.*?\]\(.*?\)", replacement, md_text, count=1)
-    return md_text
+def inject_vision_data(document_elements):
+    final_blocks = []
+
+    for item in document_elements:
+        if item["type"] == "text":
+            final_blocks.append(item["content"])
+        elif item["type"] == "image":
+            # [МОДИФИЦИРОВАНО]: Передаем в функцию оцифровки кроп и скриншот всей страницы
+            crop_img = item["content"]
+            full_page_img = item.get("full_page_image")
+
+            description = describe_image(crop_img, full_page_img=full_page_img)
+            if description.strip():
+                final_blocks.append(description)
+
+    return "\n\n".join(final_blocks)
 
 
 def run_pipeline(book_path, output_folder, start_page, end_page):
-    # Теперь параметры функции строго совпадают с именами при вызове
     for current_page in range(start_page, end_page + 1):
         print(f"\n🔄 Начинаем обработку страницы {current_page}...")
 
-        # Используем переданный book_path вместо глобального
-        raw_markdown, image_paths = parse_pdf_pro(book_path, current_page, current_page)
-        full_text = inject_vision_data(raw_markdown, image_paths)
-        full_text_expanded = force_expand_abbreviations(full_text)
+        # 1. Парсим элементы страницы
+        document_elements = parse_pdf_pro(book_path, current_page, current_page)
 
-        refined_page = refine_medical_chunk(full_text_expanded)
+        page_final_blocks = []
 
-        if refined_page:
-            # Передаем динамический output_folder
-            save_chunk_to_folder(refined_page, f"page_{current_page}.json", output_folder)
-            print(f"✅ Страница {current_page} успешно сохранена.")
+        for item in document_elements:
+            if item["type"] == "text":
+                # Обычный текст прогоняем через цепочку очистки (Рефайнер)
+                text_expanded = force_expand_abbreviations(item["content"])
+                refined_data = refine_medical_chunk(text_expanded)
 
-        if current_page < end_page:
-            delay_minutes = 1
-            print(f"⏳ Пауза {delay_minutes} мин. для сброса лимитов API Gemini...")
-            time.sleep(delay_minutes * 60)
+                # Извлекаем очищенный текст из ответа рефайнера
+                if isinstance(refined_data, dict) and "refined_text" in refined_data:
+                    if refined_data["refined_text"].strip():
+                        page_final_blocks.append(refined_data["refined_text"])
+
+            elif item["type"] == "image":
+                # [ИСПРАВЛЕНО]: Текст из Vision-модели полностью защищен от повторной фильтрации!
+                crop_img = item["content"]
+                full_page_img = item.get("full_page_image")
+
+                vision_description = describe_image(crop_img, full_page_img=full_page_img)
+                if vision_description.strip():
+                    # Только раскрываем медицинские аббревиатуры, но не переписываем текст
+                    vision_description_expanded = force_expand_abbreviations(vision_description)
+                    page_final_blocks.append(vision_description_expanded)
+
+        # 2. Соединяем всё в единый чистый медицинский чанк для страницы
+        combined_page_text = "\n\n".join(page_final_blocks)
+
+        # 3. Формируем финальный JSON-объект, готовый для векторайзера
+        final_json_payload = {
+            "analysis_status": "success" if combined_page_text.strip() else "failed",
+            "refined_text": combined_page_text
+        }
+
+        if combined_page_text.strip():
+            save_chunk_to_folder(final_json_payload, f"page_{current_page}.json", output_folder)
+            print(f"✅ Страница {current_page} успешно сохранена без дублирования элементов.")
 
 
 if __name__ == "__main__":
@@ -66,6 +98,6 @@ if __name__ == "__main__":
     run_pipeline(
         book_path=book_path,
         output_folder=output_folder,
-        start_page=82,
-        end_page=100
+        start_page=198,
+        end_page=198
     )

@@ -29,56 +29,46 @@ def logit_to_percentage(score: float) -> float:
     probability = 1 / (1 + math.exp(-score))
     return round(probability * 100, 2)
 
+
 def rewrite_patient_query(patient_text: str) -> str:
     """
-    Превращает разговорную речь пациента в строгий медицинский поисковый запрос через YandexGPT.
+    Превращает разговорную речь пациента в строгий медицинский поисковый запрос
+    через Gemini 2.5 Flash на OpenRouter.
     """
-    folder_id = os.getenv("YANDEX_FOLDER_ID")
-    api_key = os.getenv("YANDEX_API_KEY")
-
-    url = "https://llm.api.cloud.yandex.net/foundationModels/v1/completion"
-
+    url = "https://openrouter.ai/api/v1/chat/completions"
     headers = {
-        "Authorization": f"Api-Key {api_key}",
-        "x-folder-id": folder_id,
+        "Authorization": f"Bearer {os.getenv('OPENROUTER_API_KEY')}",
         "Content-Type": "application/json"
     }
 
-    data = {
-        "modelUri": f"gpt://{folder_id}/yandexgpt-lite",
-        "completionOptions": {
-            "stream": False,
-            "temperature": 0.2,
-            "maxTokens": 2000
-        },
+    sys_instr = (
+        "Ты — профессиональный медицинский аналитик. Твоя задача: перевести жалобу пациента "
+        "с разговорного языка в строгий медицинский поисковый запрос (выдели ключевые симптомы, "
+        "синдромы и термины) для поиска по клиническим рекомендациям. "
+        "Выводи ТОЛЬКО текст запроса. Никаких вводных слов, пояснений и кавычек."
+    )
+
+    payload = {
+        "model": "google/gemini-2.5-flash",
+        "temperature": 0.2,
         "messages": [
-            {
-                "role": "system",
-                "text": (
-                    "Ты — опытный врач-кардиолог. Переведи бытовые жалобы пациента в один лаконичный "
-                    "поисковый запрос из ключевых медицинских терминов для поиска в клинических рекомендациях.\n\n"
-                    "Правила:\n"
-                    "1. Не пиши списки, анкеты и знаки двоеточия.\n"
-                    "2. Переводи числовой возраст в медицинскую категорию (например: 35 лет -> 'у молодых пациентов' или 'взрослые'; 75 лет -> 'в пожилом возрасте').\n"
-                    "3. Выдавай результат одной строкой.\n\n"
-                    "Пример:\n"
-                    "Пациент: 'Мне 25, дома намерил 135 на 85, болит затылок'\n"
-                    "Результат: 'высокое нормальное артериальное давление симптомы цефалгии у молодых пациентов'"
-                )
-            },
-            {
-                "role": "user",
-                "text": patient_text
-            }
+            {"role": "system", "content": sys_instr},
+            {"role": "user", "content": patient_text}
         ]
     }
+
     try:
-        response = requests.post(url, headers=headers, json=data)
-        if response.status_code == 200:
-            return response.json()["result"]["alternatives"][0]["message"]["text"]
+        response = requests.post(url, headers=headers, json=payload)
+        response.raise_for_status()
+
+        # Извлекаем очищенный текст запроса
+        refined_query = response.json()['choices'][0]['message']['content'].strip()
+        return refined_query
+
     except Exception as e:
-        print(f"Ошибка перефразирования: {e}")
-    return patient_text
+        print(f"⚠️ Ошибка перефразирования через OpenRouter: {e}")
+        # В случае сбоя возвращаем оригинальный текст, чтобы pipeline не падал
+        return patient_text
 
 
 def hybrid_search(search_query: str, top_k: int = 5):
@@ -132,7 +122,7 @@ if __name__ == "__main__":
     print(f"👤 Вопрос пациента: {patient_question}\n")
 
     # 2. Переводим его в медицинские термины через Яндекс
-    print("🤖 Отправляем запрос в YandexGPT для перефразирования...")
+    print("🤖 Отправляем запрос в Gemini-2.5-Flash для перефразирования...")
     medical_query = rewrite_patient_query(patient_question)
     print(f"🔍 Сформированный медицинский запрос: {medical_query}\n")
 

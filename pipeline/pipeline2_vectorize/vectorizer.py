@@ -23,7 +23,7 @@ def clean_excessive_whitespace(text):
     return text
 
 
-def get_smart_chunks(text, chunk_size=1200, chunk_overlap=300):
+def get_smart_chunks(text, chunk_size=15000, chunk_overlap=300):
     headers_to_split_on = [("#", "Header 1")]
     markdown_splitter = MarkdownHeaderTextSplitter(headers_to_split_on=headers_to_split_on)
     md_splits = markdown_splitter.split_text(text)
@@ -99,7 +99,8 @@ if __name__ == "__main__":
                 data = json.load(f)
                 text_to_upload = data.get("refined_text", "")
 
-            page_num = i + 1
+            page_match = re.search(r'\d+', filename)
+            page_num = int(page_match.group()) if page_match else (i + 1)
 
             if i < len(files) - 1:
                 next_page_num = page_num + 1
