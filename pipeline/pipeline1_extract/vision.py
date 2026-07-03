@@ -4,34 +4,62 @@ from dotenv import load_dotenv
 from google import genai
 from google.genai import types
 from pydantic import BaseModel, Field
-# [ИСПРАВЛЕНО]: Импортируем именно словарь MEDICAL_DICT напрямую из модуля
 from pipeline.utils.abbreviations import MEDICAL_DICT
 
 load_dotenv()
 
-# [ИСПРАВЛЕНО]: Формируем чистый текст словаря без ошибок импорта и без регулярных выражений
 DICT_PROMPT_STRING = "\n".join([f"{k} -> {v}" for k, v in MEDICAL_DICT.items()])
 
 
 class ExtractedFact(BaseModel):
     context: str = Field(
-        description="Полный набор условий, осей или заголовков (например: 'Пол: Ж, Возраст: 50, Давление: 140')")
-    value: str = Field(description="Конкретное значение, цифра, результат или следующее действие для данного контекста")
+        description="Полный набор условий, осей или заголовков (например: 'Препарат: Агонисты имидазолиновых рецепторов, Категория: Противопоказания')")
+    value: str = Field(description="Конкретное значение, цифра, результат или симптом")
+
+
+# [НОВОЕ]: Строгая модель для ячейки строки вместо динамического dict, чтобы обойти ограничение additionalProperties
+class RowStateCell(BaseModel):
+    column_name: str = Field(
+        description="Название колонки или заголовка (например 'Препарат', 'Показания', 'Дозировка')")
+    cell_value: str = Field(description="Точный текст ячейки в этой колонке в самом низу изображения")
 
 
 class ImageExtraction(BaseModel):
     analysis_status: str = Field(description="Статус: 'success' если данные успешно извлечены, иначе 'failed'")
     source_type: str = Field(description="Тип контента: 'таблица', 'алгоритм', 'график' или 'легенда'")
     global_context: str = Field(description="Общее название или суть изображения")
+
+    # [ИСПРАВЛЕНО]: Используем list[RowStateCell] вместо dict[str, str], так как Gemini API не поддерживает additionalProperties
+    last_row_state: list[RowStateCell] = Field(
+        default=[],
+        description="Снимок всей крайней нижней строки таблицы в виде списка колонок и их значений в самом низу страницы."
+    )
     facts: list[ExtractedFact] = Field(description="Массив всех извлеченных атомарных данных")
-    footnotes: list[str] = Field(default=[], description="Дословный список всех сносок и примечаний под таблицей")
+    footnotes: list[str] = Field(
+        default=[],
+        description="Дословный список всех сносок, примечаний и пояснений под таблицей, обозначенных звездочками (*), буквами (a, b, c) или цифрами (1, 2)"
+    )
 
 
-def describe_image(pil_img, full_page_img=None, previous_table_title=None):
+def describe_image(pil_img, full_page_img=None, previous_table_title=None, previous_row_state=None):
     if pil_img is None:
-        return "", None
+        return "", None, {}
 
     client = genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
+
+    continuation_prompt = ""
+    if previous_table_title:
+        continuation_prompt += f"\nВНИМАНИЕ: Это изображение может быть продолжением таблицы '{previous_table_title}'."
+
+    # Передача снимка многоколоночной таблицы в JSON-формате
+    if previous_row_state and isinstance(previous_row_state, dict) and len(previous_row_state) > 0:
+        state_json_str = json.dumps(previous_row_state, ensure_ascii=False)
+        continuation_prompt += (
+            f"\nКРИТИЧЕСКОЕ ПРАВИЛО МНОГОКОЛОНОЧНОГО ПЕРЕНОСА: Верхние ячейки таблицы могут быть продолжением строки с прошлой страницы. "
+            f"Вот полный снимок (словарь колонок) окончания прошлой страницы: {state_json_str}. "
+            f"Если ячейка слева пуста, подставь субъект из этого словаря. Если ячейка в любой из колонок начинается со строчной буквы или обрывка слова, "
+            f"найди соответствующую колонку в словаре и бесшовно объедини окончание с прошлой страницы с началом на этой странице!"
+        )
 
     sys_instr = (
         "Ты — эксперт-аналитик по оцифровке медицинских данных для векторных баз (RAG). "
@@ -39,34 +67,38 @@ def describe_image(pil_img, full_page_img=None, previous_table_title=None):
         "ПРАВИЛА:\n"
         "1. УНИВЕРСАЛЬНОСТЬ И МОРФОЛОГИЯ: Адаптируйся под любой контент. Если на изображении есть медицинские аббревиатуры, "
         "ОБЯЗАТЕЛЬНО расшифровывай их согласно предоставленному ниже словарю. При расшифровке СТРОГО согласуй падеж, род и число "
-        "с контекстом предложения (например, если на картинке 'при низкой ФВ', пиши 'при низкой фракцией выброса (ФВ)').\n"
-        "2. АТОМАРНОСТЬ: Каждый факт независим. В поле 'context' дублируй ВСЕ параметры, которые ведут к значению. "
-        "В поле 'value' пиши только итоговую цифру или действие.\n"
-        "3. НУЛЕВАЯ ПОТЕРЯ ДАННЫХ И СНОСОК: Извлекай текст verbatim (дословно). Все примечания, мелкий шрифт "
-        "и текст под звездочками (*, **) ОБЯЗАТЕЛЬНО помещай в массив 'footnotes'.\n"
-        "4. БЕЗ ФАНТАЗИЙ: Переноси данные один в один. Неразборчиво = пиши '[Неразборчиво]'.\n\n"
+        "с контекстом предложения.\n"
+        "2. АТОМАРНОСТЬ И ЗАПРЕТ НА СЖАТИЕ МАТРИЦ: Каждый факт независим. КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО сокращать, группировать "
+        "или резюмировать таблицы и числовые матрицы! Если перед тобой большая сетка (например, шкала SCORE2 на 200+ ячеек), "
+        "ты ОБЯЗАН оцифровать АБСОЛЮТНО КАЖДУЮ числовую ячейку как отдельный независимый факт. 100 ячеек на картинке = ровно 100 "
+        "объектов в массиве 'facts'. В поле 'context' перечисли всю цепочку координат (оси X и Y, заголовки строк и колонок), "
+        "ведущих к этой конкретной цифре.\n"
+        "3. НУЛЕВАЯ ПОТЕРЯ ДАННЫХ И СНОСОК: Извлекай текст verbatim (дословно). Внимательно проверяй самый низ изображения! "
+        "Все примечания, легенды и текст сносок помещай в массив 'footnotes'.\n"
+        "4. БЕЗ ФАНТАЗИЙ: Переноси данные один в один. Неразборчиво = пиши '[Неразборчиво]'.\n"
+        f"{continuation_prompt}\n\n"
         f"--- СЛОВАРЬ РАСШИФРОВКИ АББРЕВИАТУР ---\n{DICT_PROMPT_STRING}"
     )
 
     user_content = []
     if full_page_img is not None:
-        text_prompt = "Используй первое изображение (всю страницу) для понимания контекста. Оцифруй второе изображение (кроп) в массив строгих фактов и сносок с расшифровкой аббревиатур."
-        user_content.extend([full_page_img, pil_img, text_prompt])
+        user_content.extend([full_page_img, pil_img,
+                             "Оцифруй второе изображение (кроп) в массив строгих фактов с учетом переноса таблиц."])
     else:
-        text_prompt = "Оцифруй данное изображение в массив фактов и сносок с расшифровкой аббревиатур."
-        user_content.extend([pil_img, text_prompt])
+        user_content.extend([pil_img, "Оцифруй данное изображение в массив фактов с учетом переноса таблиц."])
 
     config = types.GenerateContentConfig(
         system_instruction=sys_instr,
         temperature=0.0,
+        max_output_tokens=32768,
         response_mime_type="application/json",
         response_schema=ImageExtraction
     )
 
     try:
-        print("⏳ Оцифровка через Structured Outputs...")
+        print("⏳ Оцифровка таблицы с контролем многоколоночных разрывов...")
         response = client.models.generate_content(
-            model="gemini-2.5-flash",
+            model="gemini-3.5-flash",
             contents=user_content,
             config=config
         )
@@ -76,12 +108,26 @@ def describe_image(pil_img, full_page_img=None, previous_table_title=None):
         if data.get("analysis_status") == "success" and (data.get("facts") or data.get("footnotes")):
             global_ctx = data.get("global_context", "").strip()
             source_type = data.get("source_type", "")
+
+            # [НОВОЕ]: Преобразуем список объектов RowStateCell обратно в удобный словарь Python
+            raw_row_list = data.get("last_row_state", [])
+            row_state = {}
+            if isinstance(raw_row_list, list):
+                for cell in raw_row_list:
+                    if isinstance(cell, dict) and "column_name" in cell and "cell_value" in cell:
+                        row_state[cell["column_name"]] = cell["cell_value"]
+
+            # Проверка завершенности предложения
+            non_empty_vals = [str(val).strip() for val in row_state.values() if str(val).strip()]
+            if non_empty_vals and all(val.endswith((".", "!", "?", ";")) for val in non_empty_vals):
+                row_state = {}
+
             current_table_title = None
 
             if source_type == "таблица":
                 is_continuation = "продолжение" in global_ctx.lower() or len(global_ctx) < 10
                 if is_continuation and previous_table_title:
-                    global_ctx = f"{previous_table_title} (Продолжение с предыдущей страницы)"
+                    global_ctx = f"{previous_table_title} (Продолжение)"
                     current_table_title = previous_table_title
                 else:
                     current_table_title = global_ctx
@@ -89,8 +135,7 @@ def describe_image(pil_img, full_page_img=None, previous_table_title=None):
             text_blocks = [f"--- Контекст изображения: {global_ctx} ({source_type}) ---"]
 
             for fact in data.get("facts", []):
-                fact_str = f"Условия: [{fact['context']}] => Значение: {fact['value']}"
-                text_blocks.append(fact_str)
+                text_blocks.append(f"Условия: [{fact['context']}] => Значение: {fact['value']}")
 
             if data.get("footnotes"):
                 text_blocks.append("\n--- Сноски и примечания к таблице ---")
@@ -98,10 +143,10 @@ def describe_image(pil_img, full_page_img=None, previous_table_title=None):
                     text_blocks.append(f"• {note}")
 
             final_text = "\n".join(text_blocks)
-            return final_text, current_table_title
+            return final_text, current_table_title, row_state
         else:
-            return "", None
+            return "", None, {}
 
     except Exception as e:
         print(f"❌ Ошибка при обработке картинки: {e}")
-        return "", None
+        return "", None, {}

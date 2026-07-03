@@ -29,8 +29,8 @@ def inject_vision_data(document_elements):
         elif item["type"] == "image":
             crop_img = item["content"]
             full_page_img = item.get("full_page_image")
-            # [ИСПРАВЛЕНО]: Распаковываем кортеж (текст, заголовок)
-            description, _ = describe_image(crop_img, full_page_img=full_page_img)
+            # Распаковываем кортеж из 3 элементов, игнорируя память (для разовой инжекции)
+            description, _, _ = describe_image(crop_img, full_page_img=full_page_img)
             if description.strip():
                 final_blocks.append(description)
 
@@ -38,8 +38,9 @@ def inject_vision_data(document_elements):
 
 
 def run_pipeline(book_path, output_folder, start_page, end_page):
-    # [НОВОЕ]: Память пайплайна для сохранения названия таблицы при переносе на след. страницу
+    # [НОВОЕ]: Двойная память пайплайна: название таблицы и универсальный словарь состояния колонок
     last_table_title = None
+    last_row_state = {}
 
     for current_page in range(start_page, end_page + 1):
         print(f"\n🔄 Начинаем обработку страницы {current_page}...")
@@ -49,7 +50,14 @@ def run_pipeline(book_path, output_folder, start_page, end_page):
 
         for item in document_elements:
             if item["type"] == "text":
-                refined_data = refine_medical_chunk(item["content"])
+                text_expanded = force_expand_abbreviations(item["content"])
+
+                table_match = re.search(r'(Таблица\s+[\w\.\-/]+[^\n]+)', text_expanded, re.IGNORECASE)
+                if table_match:
+                    last_table_title = table_match.group(1).strip()
+                    last_row_state = {}  # [НОВОЕ]: Полностью сбрасываем словарь состояния при начале новой таблицы
+
+                refined_data = refine_medical_chunk(text_expanded)
 
                 if isinstance(refined_data, dict) and "refined_text" in refined_data:
                     if refined_data["refined_text"].strip():
@@ -59,23 +67,25 @@ def run_pipeline(book_path, output_folder, start_page, end_page):
                 crop_img = item["content"]
                 full_page_img = item.get("full_page_image")
 
-                # [НОВОЕ]: Передаем сохраненный заголовок в Vision и обновляем память
-                vision_description, extracted_table_title = describe_image(
+                # [НОВОЕ]: Передаем словарь состояния и принимаем ровно 3 переменные
+                vision_description, extracted_table_title, extracted_state = describe_image(
                     crop_img,
                     full_page_img=full_page_img,
-                    previous_table_title=last_table_title
+                    previous_table_title=last_table_title,
+                    previous_row_state=last_row_state
                 )
 
+                # Обновляем состояние памяти для следующих страниц
                 if extracted_table_title:
                     last_table_title = extracted_table_title
+                if extracted_state and isinstance(extracted_state, dict):
+                    last_row_state = extracted_state
 
                 if vision_description.strip():
-                    vision_description_expanded = force_expand_abbreviations(vision_description)
-                    page_final_blocks.append(vision_description_expanded)
+                    page_final_blocks.append(vision_description)
 
         combined_page_text = "\n\n".join(page_final_blocks)
 
-        # [НОВОЕ]: Добавлен точный номер страницы ("page": current_page) для vectorizer.py
         final_json_payload = {
             "page": current_page,
             "analysis_status": "success" if combined_page_text.strip() else "failed",
@@ -84,7 +94,7 @@ def run_pipeline(book_path, output_folder, start_page, end_page):
 
         if combined_page_text.strip():
             save_chunk_to_folder(final_json_payload, f"page_{current_page}.json", output_folder)
-            print(f"✅ Страница {current_page} успешно сохранена без дублирования элементов.")
+            print(f"✅ Страница {current_page} успешно сохранена без потери слов и разрывов.")
 
 
 if __name__ == "__main__":
@@ -101,6 +111,6 @@ if __name__ == "__main__":
     run_pipeline(
         book_path=book_path,
         output_folder=output_folder,
-        start_page=189,
-        end_page=190
+        start_page=177,
+        end_page=181
     )

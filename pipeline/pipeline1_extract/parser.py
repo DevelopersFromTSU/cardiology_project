@@ -7,6 +7,37 @@ from docling.datamodel.base_models import InputFormat
 from docling.datamodel.pipeline_options import PdfPipelineOptions
 
 
+def detect_table_zones_by_lines(page, min_line_length=150):
+    """
+    [НОВОЕ]: Геометрический поиск таблиц по нарисованным линиям в PDF.
+    Если на странице есть горизонтальные или вертикальные линии сетки (как на стр. 187),
+    функция возвращает их Y-интервалы, даже если Docling их не распознал.
+    """
+    drawings = page.get_drawings()
+    table_y_coords = []
+
+    for draw in drawings:
+        rect = draw["rect"]
+        # Ищем горизонтальные линии таблицы (ширина > min_line_length, высота тонкая)
+        if rect.width > min_line_length and rect.height < 5:
+            table_y_coords.append((rect.y0, rect.y1))
+        # Ищем длинные вертикальные границы колонок
+        elif rect.height > 50 and rect.width < 5:
+            table_y_coords.append((rect.y0, rect.y1))
+
+    if not table_y_coords:
+        return []
+
+    # Находим общие границы графической сетки на странице
+    y_min = min(y[0] for y in table_y_coords)
+    y_max = max(y[1] for y in table_y_coords)
+
+    # Если линии занимают существенную высоту (>50 пикселей), считаем это зоной таблицы
+    if (y_max - y_min) > 50:
+        return [[y_min, y_max]]
+    return []
+
+
 def parse_pdf_pro(pdf_path, start_page=1, end_page=1):
     temp_pdf = "temp_slice.pdf"
 
@@ -39,7 +70,7 @@ def parse_pdf_pro(pdf_path, start_page=1, end_page=1):
 
     y_intervals = []
 
-    # [НОВОЕ]: ЭТАП 1 — Выявляем зоны картинок И таблиц для передачи в Vision
+    # [ИСПРАВЛЕНО]: ЭТАП 1 — Собираем зоны от Docling
     for item, _ in result.document.iterate_items():
         is_table = getattr(item, "label", "") == "table"
         has_image = hasattr(item, "image") and item.image is not None
@@ -49,6 +80,10 @@ def parse_pdf_pro(pdf_path, start_page=1, end_page=1):
             y_top = page_height - bbox.t
             y_bottom = page_height - bbox.b
             y_intervals.append([min(y_top, y_bottom), max(y_top, y_bottom)])
+
+    # [НОВОЕ]: ЭТАП 1.5 — Добавляем зоны, найденные по физическим линиям сетки PDF
+    geometric_table_zones = detect_table_zones_by_lines(page)
+    y_intervals.extend(geometric_table_zones)
 
     # ЭТАП 2 — Склеиваем близкие/пересекающиеся интервалы
     merged_y_intervals = []
@@ -65,10 +100,14 @@ def parse_pdf_pro(pdf_path, start_page=1, end_page=1):
 
     raw_elements = []
 
-    # [НОВОЕ]: ЭТАП 3 — Вырезаем картинки (Vision получает абсолютный приоритет на эти зоны)
+    # ЭТАП 3 — Вырезаем картинки (Vision получает абсолютный приоритет)
+    # [НОВОЕ]: ЭТАП 3 — Вырезаем картинки с нижним буфером (+65 px) для гарантированного захвата сносок
     for y_min, y_max in merged_y_intervals:
         try:
-            crop_rect = fitz.Rect(0, y_min, page_width, y_max)
+            # Расширяем нижнюю границу на 65 пикселей, чтобы захватить подвал со сносками
+            buffered_y_max = min(page_height, y_max + 65)
+            crop_rect = fitz.Rect(0, y_min, page_width, buffered_y_max)
+
             matrix = fitz.Matrix(3.0, 3.0)
             pix = page.get_pixmap(matrix=matrix, clip=crop_rect)
             pil_img = Image.open(io.BytesIO(pix.tobytes("png")))
@@ -82,14 +121,13 @@ def parse_pdf_pro(pdf_path, start_page=1, end_page=1):
         except Exception as e:
             print(f"⚠️ Предупреждение при склеивании картинки: {e}")
 
-    # [НОВОЕ]: ЭТАП 4 — Собираем чистый текст, строго отсекая всё, что попало в зоны картинок/таблиц
+    # ЭТАП 4 — Собираем чистый текст, строго отсекая всё, что попало в зоны таблиц
     for item, _ in result.document.iterate_items():
         if hasattr(item, "text") and item.text and getattr(item, "label", "") != "table":
             if hasattr(item, "prov") and item.prov:
                 bbox = item.prov[0].bbox
                 y_pos = page_height - bbox.t
 
-                # Проверяем перекрытие с зонами Vision (допуск +-15 пикселей)
                 inside_vision_zone = any((y_min - 15) <= y_pos <= (y_max + 15) for y_min, y_max in merged_y_intervals)
 
                 if not inside_vision_zone:
