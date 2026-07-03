@@ -37,37 +37,20 @@ def parse_pdf_pro(pdf_path, start_page=1, end_page=1):
     img_data_full = pix_full.tobytes("png")
     full_page_pil_img = Image.open(io.BytesIO(img_data_full))
 
-    # Сюда будем складывать ВСЕ элементы с их координатой Y
-    raw_elements = []
-
-    # Сюда складываем координаты картинок для склеивания
     y_intervals = []
 
-    # 1. ПЕРВЫЙ ПРОХОД: Собираем текст и рамки картинок с привязкой к высоте
+    # [НОВОЕ]: ЭТАП 1 — Выявляем зоны картинок И таблиц для передачи в Vision
     for item, _ in result.document.iterate_items():
-        if hasattr(item, "text") and item.text:
-            # Находим Y-координату текстового блока
-            y_pos = 0
-            if hasattr(item, "prov") and item.prov:
-                bbox = item.prov[0].bbox
-                # Вычисляем расстояние от верхнего края страницы (меньше цифра = выше на листе)
-                y_pos = page_height - bbox.t
+        is_table = getattr(item, "label", "") == "table"
+        has_image = hasattr(item, "image") and item.image is not None
 
-            raw_elements.append({
-                "type": "text",
-                "content": item.text,
-                "y": y_pos
-            })
-
-        elif hasattr(item, "image") and item.image is not None and hasattr(item, "prov") and item.prov:
+        if (has_image or is_table) and hasattr(item, "prov") and item.prov:
             bbox = item.prov[0].bbox
             y_top = page_height - bbox.t
             y_bottom = page_height - bbox.b
-            y_min = min(y_top, y_bottom)
-            y_max = max(y_top, y_bottom)
-            y_intervals.append([y_min, y_max])
+            y_intervals.append([min(y_top, y_bottom), max(y_top, y_bottom)])
 
-    # 2. МАТЕМАТИКА: Склеиваем пересекающиеся картинки (чтобы таблица и легенда были вместе)
+    # ЭТАП 2 — Склеиваем близкие/пересекающиеся интервалы
     merged_y_intervals = []
     if y_intervals:
         y_intervals.sort(key=lambda x: x[0])
@@ -80,31 +63,44 @@ def parse_pdf_pro(pdf_path, start_page=1, end_page=1):
             else:
                 merged_y_intervals.append(current)
 
-    # 3. ВТОРОЙ ПРОХОД: Вырезаем финальные картинки и добавляем их в общий котел с Y-координатой
+    raw_elements = []
+
+    # [НОВОЕ]: ЭТАП 3 — Вырезаем картинки (Vision получает абсолютный приоритет на эти зоны)
     for y_min, y_max in merged_y_intervals:
         try:
-            x0 = 0
-            x1 = page_width
-            crop_rect = fitz.Rect(x0, y_min, x1, y_max)
-
+            crop_rect = fitz.Rect(0, y_min, page_width, y_max)
             matrix = fitz.Matrix(3.0, 3.0)
             pix = page.get_pixmap(matrix=matrix, clip=crop_rect)
-            img_data = pix.tobytes("png")
-            pil_img = Image.open(io.BytesIO(img_data))
+            pil_img = Image.open(io.BytesIO(pix.tobytes("png")))
 
             raw_elements.append({
                 "type": "image",
                 "content": pil_img,
                 "full_page_image": full_page_pil_img,
-                "y": y_min  # Записываем верхнюю границу склеенной картинки
+                "y": y_min
             })
         except Exception as e:
             print(f"⚠️ Предупреждение при склеивании картинки: {e}")
 
-    # 4. ВОССТАНОВЛЕНИЕ ПОРЯДКА: Сортируем все элементы (текст и картинки) сверху вниз
+    # [НОВОЕ]: ЭТАП 4 — Собираем чистый текст, строго отсекая всё, что попало в зоны картинок/таблиц
+    for item, _ in result.document.iterate_items():
+        if hasattr(item, "text") and item.text and getattr(item, "label", "") != "table":
+            if hasattr(item, "prov") and item.prov:
+                bbox = item.prov[0].bbox
+                y_pos = page_height - bbox.t
+
+                # Проверяем перекрытие с зонами Vision (допуск +-15 пикселей)
+                inside_vision_zone = any((y_min - 15) <= y_pos <= (y_max + 15) for y_min, y_max in merged_y_intervals)
+
+                if not inside_vision_zone:
+                    raw_elements.append({
+                        "type": "text",
+                        "content": item.text,
+                        "y": y_pos
+                    })
+
     raw_elements.sort(key=lambda x: x["y"])
 
-    # Очищаем временную координату 'y' перед отправкой в main.py
     document_elements = []
     for el in raw_elements:
         if el["type"] == "text":
