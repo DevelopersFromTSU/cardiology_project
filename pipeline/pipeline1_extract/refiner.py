@@ -12,11 +12,16 @@ load_dotenv()
 # [НОВОЕ]: Формируем строковое представление словаря для промпта
 DICT_PROMPT_STRING = "\n".join([f"{k} -> {v}" for k, v in MEDICAL_DICT.items()])
 
+_GEMINI_CLIENT = None
+
 
 def get_gemini_client():
-    os.environ['HTTPS_PROXY'] = os.getenv('HTTPS_PROXY', '')
-    os.environ['HTTP_PROXY'] = os.getenv('HTTP_PROXY', '')
-    return genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
+    global _GEMINI_CLIENT
+    if _GEMINI_CLIENT is None:
+        os.environ['HTTPS_PROXY'] = os.getenv('HTTPS_PROXY', '')
+        os.environ['HTTP_PROXY'] = os.getenv('HTTP_PROXY', '')
+        _GEMINI_CLIENT = genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
+    return _GEMINI_CLIENT
 
 
 def refine_medical_chunk(chunk_text, max_retries=3):

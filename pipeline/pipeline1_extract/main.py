@@ -21,22 +21,6 @@ def save_chunk_to_folder(chunk_data, filename, folder_name):
     print(f"✅ Результат сохранен: {file_path}")
 
 
-def inject_vision_data(document_elements):
-    final_blocks = []
-    for item in document_elements:
-        if item["type"] == "text":
-            final_blocks.append(item["content"])
-        elif item["type"] == "image":
-            crop_img = item["content"]
-            full_page_img = item.get("full_page_image")
-            # Распаковываем кортеж из 3 элементов, игнорируя память (для разовой инжекции)
-            description, _, _ = describe_image(crop_img, full_page_img=full_page_img)
-            if description.strip():
-                final_blocks.append(description)
-
-    return "\n\n".join(final_blocks)
-
-
 def run_pipeline(book_path, output_folder, start_page, end_page):
     # [НОВОЕ]: Двойная память пайплайна: название таблицы и универсальный словарь состояния колонок
     last_table_title = None
@@ -111,6 +95,6 @@ if __name__ == "__main__":
     run_pipeline(
         book_path=book_path,
         output_folder=output_folder,
-        start_page=177,
-        end_page=181
+        start_page=220,
+        end_page=220
     )

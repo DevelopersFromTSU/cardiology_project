@@ -1,15 +1,35 @@
 import os
 import re
-import requests
+import math
 import json
+import requests
+from pathlib import Path
 from dotenv import load_dotenv
 from qdrant_client import QdrantClient
-from sentence_transformers import CrossEncoder
 from qdrant_client import models
+from sentence_transformers import CrossEncoder
 from FlagEmbedding import BGEM3FlagModel
-import math
 
-load_dotenv()
+BASE_DIR = Path(__file__).resolve().parent
+env_path = BASE_DIR / "pipeline" / ".env"
+if not env_path.exists():
+    env_path = BASE_DIR / "pipeline" / ".env.txt"
+
+if env_path.exists():
+    # Открываем с кодировкой utf-8-sig, которая автоматически уничтожает невидимый BOM-символ Блокнота
+    with open(env_path, "r", encoding="utf-8-sig") as f:
+        for line in f:
+            line = line.strip()
+            # Вырезаем артефакты вроде "", если они случайно скопировались в файл
+            line = re.sub(r"^\\s*", "", line)
+            if "=" in line and not line.startswith("#"):
+                key, val = line.split("=", 1)
+                key = key.strip()
+                val = val.strip().strip('"').strip("'")  # Очищаем кавычки вокруг значений
+                os.environ[key] = val
+
+print(f"📁 Файл окружения: '{env_path}' (Существует? {env_path.exists()})")
+print(f"🔑 Проверка памяти: FOLDER_ID='{os.getenv('YANDEX_FOLDER_ID')}' | API_KEY='{os.getenv('YANDEX_API_KEY')[:10] if os.getenv('YANDEX_API_KEY') else None}...'")
 
 qdrant = QdrantClient(url=os.getenv("QDRANT_URL", "http://localhost:6333"))
 COLLECTION_NAME = os.getenv("COLLECTION_NAME", "medical_docs")
@@ -33,41 +53,71 @@ def logit_to_percentage(score: float) -> float:
 def rewrite_patient_query(patient_text: str) -> str:
     """
     Превращает разговорную речь пациента в строгий медицинский поисковый запрос
-    через Gemini 2.5 Flash на OpenRouter.
+    через YandexGPT API (Foundation Models).
     """
-    url = "https://openrouter.ai/api/v1/chat/completions"
+    url = "https://llm.api.cloud.yandex.net/foundationModels/v1/completion"
+
+    folder_id = os.getenv("YANDEX_FOLDER_ID")
+    api_key = os.getenv("YANDEX_API_KEY")
+
+    if not folder_id or not api_key:
+        print(
+            "⚠️ Учетные данные Yandex (YANDEX_FOLDER_ID или YANDEX_API_KEY) не найдены. Поиск пойдет по сырому запросу.")
+        return patient_text
+
+    # Для статических API-ключей в Яндекс.Облаке используется схема Api-Key, а не Bearer
     headers = {
-        "Authorization": f"Bearer {os.getenv('OPENROUTER_API_KEY')}",
+        "Authorization": f"Api-Key {api_key}",
+        "x-folder-id": folder_id,
         "Content-Type": "application/json"
     }
 
     sys_instr = (
-        "Ты — профессиональный медицинский аналитик. Твоя задача: перевести жалобу пациента "
-        "с разговорного языка в строгий медицинский поисковый запрос (выдели ключевые симптомы, "
-        "синдромы и термины) для поиска по клиническим рекомендациям. "
-        "Выводи ТОЛЬКО текст запроса. Никаких вводных слов, пояснений и кавычек."
+        "Ты — специализированный поисковый процессор (NER & Query Optimizer) для медицинской базы знаний RAG. "
+        "Твоя ЕДИНСТВЕННАЯ задача — преобразовать разговорный запрос или жалобу пациента в плотный поисковый вектор "
+        "из стандартизированных клинических терминов и тегов.\n\n"
+        "ЖЕСТКИЕ ПРАВИЛА ГЕНЕРАЦИИ:\n"
+        "1. ТЕЛЕГРАФНЫЙ СТИЛЬ (БЕЗ ВОДЫ): КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО писать связные предложения, вопросы ('какое должно быть', 'подскажите'), "
+        "глаголы действия или вводные конструкции ('у пациента', 'не помогло'). Исключи все бытовые стоп-слова. Выводи ТОЛЬКО ключевые клинические сущности через пробел.\n"
+        "2. СТАНДАРТИЗАЦИЯ И АББРЕВИАТУРЫ: Переводи любые разговорные симптомы и названия болезней в официальные медицинские термины, добавляя общепринятую аббревиатуру в скобках. "
+        "Примеры: 'верхнее давление' -> 'систолическое артериальное давление (САД)', 'нижнее давление' -> 'диастолическое артериальное давление (ДАД)', "
+        "'гипертония' -> 'артериальная гипертензия (АГ)', 'сахар' / 'диабет' -> 'сахарный диабет (СД)', 'почки' -> 'хроническая болезнь почек (ХБП)', 'норма' -> 'целевой уровень'.\n"
+        "3. УНИВЕРСАЛЬНЫЕ КОЛИЧЕСТВЕННЫЕ ПОРОГИ: Если в запросе присутствуют числовые показатели (возраст, давление, пульс, анализы), обязательно сохраняй точную цифру И формируй из нее логический порог/диапазон, "
+        "используемый в клинических таблицах (например: 'возраст 82 года' -> 'возраст старше 80 лет >= 80 лет'; 'пульс 54' -> 'брадикардия ЧСС < 60 уд/мин'; 'креатинин высокий' -> 'снижение СКФ').\n"
+        "4. КЛАССИФИКАЦИЯ КЛИНИЧЕСКОГО ИНТЕНТА (НАЗНАЧЕНИЯ): Анализируй суть вопроса и добавляй маркерные теги целевого раздела рекомендаций:\n"
+        "   - Коррекция схемы при неудаче старых лекарств / добавление препарата -> теги 'стратегия лекарственной терапии шаг 2 эскалация комбинация'.\n"
+        "   - Первичное назначение таблеток -> теги 'стартовая терапия показания к началу лечения шаг 1'.\n"
+        "   - Вопросы про идеальную норму или цель -> теги 'целевые значения целевой уровень'.\n"
+        "   - Опасность, запреты, аллергия или совместимость -> теги 'противопоказания использовать с осторожностью побочные эффекты'.\n"
+        "   - Постановка диагноза или оценка опасности -> теги 'классификация стадия сердечно-сосудистый риск SCORE2'.\n"
+        "5. ФОРМАТ ВЫДАЧИ: Выводи ТОЛЬКО итоговую строку тегов без кавычек, точек и пояснений."
     )
 
     payload = {
-        "model": "google/gemini-2.5-flash",
-        "temperature": 0.2,
+        "modelUri": f"gpt://{folder_id}/yandexgpt/latest",
+        "completionOptions": {
+            "stream": False,
+            "temperature": 0.1,
+            "maxTokens": "300"
+        },
         "messages": [
-            {"role": "system", "content": sys_instr},
-            {"role": "user", "content": patient_text}
+            {"role": "system", "text": sys_instr},
+            {"role": "user", "text": patient_text}
         ]
     }
 
     try:
-        response = requests.post(url, headers=headers, json=payload)
+        response = requests.post(url, headers=headers, json=payload, timeout=10)
         response.raise_for_status()
 
-        # Извлекаем очищенный текст запроса
-        refined_query = response.json()['choices'][0]['message']['content'].strip()
+        # В структуре ответа Yandex Cloud ML текст лежит в result -> alternatives -> message -> text
+        response_data = response.json()
+        refined_query = response_data['result']['alternatives'][0]['message']['text'].strip()
         return refined_query
 
     except Exception as e:
-        print(f"⚠️ Ошибка перефразирования через OpenRouter: {e}")
-        # В случае сбоя возвращаем оригинальный текст, чтобы pipeline не падал
+        print(f"⚠️ Ошибка перефразирования через YandexGPT: {e}")
+        # В случае сбоя возвращаем оригинальный текст, чтобы конвейер не падал
         return patient_text
 
 
@@ -118,11 +168,14 @@ def hybrid_search(search_query: str, top_k: int = 5):
 
 if __name__ == "__main__":
     # 1. Прописываем живой вопрос пациента
-    patient_question = "Мне 35 лет. Стал часто измерять давление дома, верхнее стабильно держится в районе 135, а нижнее около 87. Голова при этом немного тяжелая. Подскажите, это уже считается болезнью или еще нормально?"
+    patient_question = ("У моего дедушки 82 года, гипертония в сочетании с фибрилляцией предсердий. Пульс постоянно "
+                        "высокий, около 88 ударов в минуту. Стартовая терапия не помогла снизить давление до нормы. "
+                        "Какое целевое верхнее давление ему нужно держать и какие препараты нужно добавить на втором "
+                        "шаге лечения?")
     print(f"👤 Вопрос пациента: {patient_question}\n")
 
     # 2. Переводим его в медицинские термины через Яндекс
-    print("🤖 Отправляем запрос в Gemini-2.5-Flash для перефразирования...")
+    print("🤖 Отправляем запрос в YandexGPT для перефразирования...")
     medical_query = rewrite_patient_query(patient_question)
     print(f"🔍 Сформированный медицинский запрос: {medical_query}\n")
 

@@ -23,7 +23,7 @@ def clean_excessive_whitespace(text):
     return text
 
 
-def get_smart_chunks(text, chunk_size=15000, chunk_overlap=300):
+def get_smart_chunks(text, chunk_size=3000, chunk_overlap=300):
     headers_to_split_on = [("#", "Header 1")]
     markdown_splitter = MarkdownHeaderTextSplitter(headers_to_split_on=headers_to_split_on)
     md_splits = markdown_splitter.split_text(text)
