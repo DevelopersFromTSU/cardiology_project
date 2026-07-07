@@ -11,8 +11,8 @@ from FlagEmbedding import BGEM3FlagModel
 
 def clean_excessive_whitespace(text):
     if not text:
-        return text
-    # Удаляем библиографические ссылки
+        return ""
+    # Удаляем библиографические ссылки [1, 2]
     text = re.sub(r'\[\d+[\d\s,\-]*\]', '', text)
     # Заменяем 3 и более переносов строк на стандартные 2
     text = re.sub(r'\n{3,}', '\n\n', text)
@@ -20,42 +20,81 @@ def clean_excessive_whitespace(text):
     text = re.sub(r'[ \t]+$', '', text, flags=re.MULTILINE)
     # Заменяем 2+ пробела между словами на один
     text = re.sub(r'(?<=\S)[ \t]{2,}', ' ', text)
-    return text
+    return text.strip()
 
 
-def get_smart_chunks(text, chunk_size=3000, chunk_overlap=300):
+def get_global_chunks_with_pages(page_files_data, chunk_size=3000, chunk_overlap=300):
+    """
+    [НОВОЕ]: Объединяет страницы в единый поток, режет на чанки с бесшовным
+    перехлестом и точно присваивает номер страницы каждому чанку без дубликатов.
+    """
+    full_text = ""
+    page_boundaries = []  # Хранит кортежи: (start_char, end_char, page_num)
+
+    # 1. Собираем единый текст и карту страниц
+    for page_num, raw_text in page_files_data:
+        cleaned = clean_excessive_whitespace(raw_text)
+        if not cleaned:
+            continue
+
+        start_idx = len(full_text)
+        full_text += cleaned + "\n\n"
+        end_idx = len(full_text)
+        page_boundaries.append((start_idx, end_idx, page_num))
+
+    # 2. Сначала учитываем Markdown-заголовки
     headers_to_split_on = [("#", "Header 1")]
     markdown_splitter = MarkdownHeaderTextSplitter(headers_to_split_on=headers_to_split_on)
-    md_splits = markdown_splitter.split_text(text)
+    md_splits = markdown_splitter.split_text(full_text)
 
+    # 3. Режем текст с отслеживанием начального индекса (add_start_index=True)
     text_splitter = RecursiveCharacterTextSplitter(
         chunk_size=chunk_size,
         chunk_overlap=chunk_overlap,
-        length_function=len
+        length_function=len,
+        add_start_index=True
     )
-    return text_splitter.split_documents(md_splits)
+    final_chunks = text_splitter.split_documents(md_splits)
+
+    # 4. Присваиваем правильную страницу каждому чанку
+    chunks_with_metadata = []
+    for chunk in final_chunks:
+        start_char = chunk.metadata.get("start_index", 0)
+
+        # Находим, в диапазон какой страницы попадает начало чанка
+        assigned_page = page_boundaries[0][2] if page_boundaries else 1
+        for p_start, p_end, p_num in page_boundaries:
+            if p_start <= start_char < p_end:
+                assigned_page = p_num
+                break
+
+        chunk.metadata["page"] = assigned_page
+        chunks_with_metadata.append(chunk)
+
+    return chunks_with_metadata
 
 
-def process_and_upload(text_to_upload, page_num, qdrant_client, embedding_model, collection_name):
-    cleaned_text = clean_excessive_whitespace(text_to_upload)
-    chunks = get_smart_chunks(cleaned_text)
+def upload_chunks_to_qdrant(chunks, qdrant_client, embedding_model, collection_name):
+    """
+    [НОВОЕ]: Пакетная векторизация и загрузка всех чанков документа.
+    """
+    print(f"🔄 Подготовка к загрузке {len(chunks)} чанков в Qdrant...")
 
-    for chunk in chunks:
+    for i, chunk in enumerate(chunks, 1):
         chunk_text = chunk.page_content
+        page_num = chunk.metadata.get("page", 0)
 
-        # Получаем плотный и разреженный векторы за один проход модели
+        # Получаем плотный и разреженный векторы за один проход BGE-M3
         outputs = embedding_model.encode([chunk_text], return_dense=True, return_sparse=True)
 
         dense_vec = outputs['dense_vecs'][0].tolist()
         sparse_dict = outputs['lexical_weights'][0]
 
-        # Формируем структуру разреженного вектора для Qdrant
         sparse_vec = models.SparseVector(
             indices=[int(k) for k in sparse_dict.keys()],
             values=[float(v) for v in sparse_dict.values()]
         )
 
-        # Записываем точку с именованными векторами
         point = models.PointStruct(
             id=str(uuid.uuid4()),
             vector={
@@ -65,6 +104,7 @@ def process_and_upload(text_to_upload, page_num, qdrant_client, embedding_model,
             payload={"text": chunk_text, "page": page_num}
         )
         qdrant_client.upsert(collection_name=collection_name, points=[point])
+        print(f"✅ Загружен чанк {i}/{len(chunks)} (Страница {page_num})")
 
 
 if __name__ == "__main__":
@@ -76,10 +116,9 @@ if __name__ == "__main__":
 
     qdrant = QdrantClient(url=os.getenv("QDRANT_URL", "http://localhost:6333"))
 
-    # Перенастрой инициализацию модели (размерность BGE-M3 = 1024)
+    print("⏳ Загрузка модели BGE-M3...")
     model = BGEM3FlagModel('BAAI/bge-m3', use_fp16=True)
 
-    # Создаем коллекцию с поддержкой разреженных (sparse) и плотных (dense) векторов
     if not qdrant.collection_exists(collection_name):
         qdrant.create_collection(
             collection_name=collection_name,
@@ -91,38 +130,27 @@ if __name__ == "__main__":
             }
         )
 
+    # 1. Читаем все файлы страниц в память и сортируем по номеру страницы
     if os.path.exists(json_folder):
         files = sorted([f for f in os.listdir(json_folder) if f.endswith('.json')])
-        for i, filename in enumerate(files):
+        page_files_data = []
+
+        for filename in files:
             filepath = os.path.join(json_folder, filename)
             with open(filepath, 'r', encoding='utf-8') as f:
                 data = json.load(f)
-                text_to_upload = data.get("refined_text", "")
+                text = data.get("refined_text", "")
 
             page_match = re.search(r'\d+', filename)
-            page_num = int(page_match.group()) if page_match else (i + 1)
+            page_num = int(page_match.group()) if page_match else 1
+            page_files_data.append((page_num, text))
 
-            if i < len(files) - 1:
-                next_page_num = page_num + 1
-                next_filepath = os.path.join(json_folder, files[i + 1])
-                with open(next_filepath, 'r', encoding='utf-8') as f_next:
-                    next_text = json.load(f_next).get("refined_text", "")
-                    raw_overlap = next_text[:500]
-                    matches = list(re.finditer(r'[.!?;](?=\s|$)', raw_overlap))
+        # Сортируем строго по возрастанию номеров страниц (page_1, page_2, ..., page_10)
+        page_files_data.sort(key=lambda x: x[0])
 
-                    if matches:
-                        last_punctuation = matches[-1].start()
-                        overlap_text = raw_overlap[:last_punctuation + 1]
-                    else:
-                        last_newline = raw_overlap.rfind('\n')
-                        overlap_text = raw_overlap[:last_newline] if last_newline != -1 else raw_overlap
+        # 2. Генерируем чанки со сквозным нахлестом по всему документу
+        all_chunks = get_global_chunks_with_pages(page_files_data)
 
-                    text_to_upload += f"\n\n--- НАЧАЛО СТРАНИЦЫ {next_page_num} ---\n\n" + overlap_text
-
-            process_and_upload(
-                text_to_upload=text_to_upload,
-                page_num=page_num,
-                qdrant_client=qdrant,
-                embedding_model=model,
-                collection_name=collection_name
-            )
+        # 3. Отправляем в базу
+        upload_chunks_to_qdrant(all_chunks, qdrant, model, collection_name)
+        print("🎉 Векторизация и загрузка успешно завершены!")
