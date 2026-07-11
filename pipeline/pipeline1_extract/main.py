@@ -8,6 +8,7 @@ from pipeline.pipeline1_extract.parser import parse_pdf_pro
 from pipeline.pipeline1_extract.vision import describe_image
 from pipeline.pipeline1_extract.refiner import refine_medical_chunk
 from pipeline.utils.abbreviations import force_expand_abbreviations
+from pipeline.pipeline1_extract.refiner import refine_medical_chunk, generate_page_metadata
 
 
 def save_chunk_to_folder(chunk_data, filename, folder_name):
@@ -38,9 +39,9 @@ def save_chunk_to_folder(chunk_data, filename, folder_name):
 
 
 def run_pipeline(book_path, output_folder, start_page, end_page):
-    # [НОВОЕ]: Двойная память пайплайна: название таблицы и универсальный словарь состояния колонок
     last_table_title = None
     last_row_state = {}
+    previous_page_topic = None  # [НОВОЕ]: Память о теме прошлой страницы
 
     for current_page in range(start_page, end_page + 1):
         print(f"\n🔄 Начинаем обработку страницы {current_page}...")
@@ -86,9 +87,22 @@ def run_pipeline(book_path, output_folder, start_page, end_page):
 
         combined_page_text = "\n\n".join(page_final_blocks)
 
+        # [НОВОЕ]: Генерируем метаданные, если страница не пустая
+        page_topic = "Не определена"
+        page_tags = "Нет тегов"
+
+        if combined_page_text.strip():
+            print("⏳ Генерация метаданных страницы (тема и теги)...")
+            metadata = generate_page_metadata(combined_page_text, previous_page_topic)
+            page_topic = metadata.get("topic", "Не определена")
+            page_tags = metadata.get("tags", "Нет тегов")
+            previous_page_topic = page_topic  # Сохраняем тему для следующей итерации
+
         final_json_payload = {
             "page": current_page,
             "analysis_status": "success" if combined_page_text.strip() else "failed",
+            "topic": page_topic,  # [НОВОЕ]: Добавляем тему в JSON
+            "tags": page_tags,  # [НОВОЕ]: Добавляем теги в JSON
             "refined_text": combined_page_text
         }
 
@@ -111,6 +125,6 @@ if __name__ == "__main__":
     run_pipeline(
         book_path=book_path,
         output_folder=output_folder,
-        start_page=220,
-        end_page=220
+        start_page=212,
+        end_page=212
     )

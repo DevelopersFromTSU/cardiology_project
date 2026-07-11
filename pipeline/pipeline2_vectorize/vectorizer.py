@@ -23,22 +23,21 @@ def clean_excessive_whitespace(text):
     return text.strip()
 
 
-def get_global_chunks_with_pages(page_files_data, chunk_size=3000, chunk_overlap=300):
-    """
-    [НОВОЕ]: Объединяет страницы в единый поток, режет на чанки с бесшовным
-    перехлестом и точно присваивает номер страницы каждому чанку без дубликатов.
-    """
+def get_global_chunks_with_pages(page_files_data, chunk_size=4000, chunk_overlap=400):
     full_text = ""
-    page_boundaries = []  # Хранит кортежи: (start_char, end_char, page_num)
+    page_boundaries = []
 
     # 1. Собираем единый текст и карту страниц
-    for page_num, raw_text in page_files_data:
+    for page_num, raw_text, topic, tags in page_files_data: # [НОВОЕ]: распаковываем topic и tags
         cleaned = clean_excessive_whitespace(raw_text)
         if not cleaned:
             continue
 
+        # [НОВОЕ]: Приклеиваем метаданные к тексту страницы
+        enriched_text = f"--- ТЕМА СТРАНИЦЫ: {topic} ---\n--- ТЕГИ: {tags} ---\nДАННЫЕ:\n{cleaned}"
+
         start_idx = len(full_text)
-        full_text += cleaned + "\n\n"
+        full_text += enriched_text + "\n\n"
         end_idx = len(full_text)
         page_boundaries.append((start_idx, end_idx, page_num))
 
@@ -140,10 +139,13 @@ if __name__ == "__main__":
             with open(filepath, 'r', encoding='utf-8') as f:
                 data = json.load(f)
                 text = data.get("refined_text", "")
+                topic = data.get("topic", "")  # [НОВОЕ]
+                tags = data.get("tags", "")  # [НОВОЕ]
 
             page_match = re.search(r'\d+', filename)
             page_num = int(page_match.group()) if page_match else 1
-            page_files_data.append((page_num, text))
+            # [НОВОЕ]: передаем 4 элемента в кортеже
+            page_files_data.append((page_num, text, topic, tags))
 
         # Сортируем строго по возрастанию номеров страниц (page_1, page_2, ..., page_10)
         page_files_data.sort(key=lambda x: x[0])
