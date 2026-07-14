@@ -64,9 +64,9 @@ def parse_pdf_pro(pdf_path, start_page=1, end_page=1):
         page_width = page.rect.width
         page_height = page.rect.height
 
-        matrix_full = fitz.Matrix(3.0, 3.0)
+        matrix_full = fitz.Matrix(0.3, 0.3)
         pix_full = page.get_pixmap(matrix=matrix_full)
-        img_data_full = pix_full.tobytes("png")
+        img_data_full = pix_full.tobytes("jpeg")
         full_page_pil_img = Image.open(io.BytesIO(img_data_full))
 
         y_intervals = []

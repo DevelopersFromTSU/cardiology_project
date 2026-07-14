@@ -3,7 +3,7 @@ import os
 import time
 import json
 from dotenv import load_dotenv
-
+from pydantic import BaseModel, Field
 from pipeline.pipeline1_extract.parser import parse_pdf_pro
 from pipeline.pipeline1_extract.vision import describe_image
 from pipeline.pipeline1_extract.refiner import refine_medical_chunk
@@ -83,7 +83,8 @@ def run_pipeline(book_path, output_folder, start_page, end_page):
                     last_row_state = extracted_state
 
                 if vision_description.strip():
-                    page_final_blocks.append(vision_description)
+                    expanded_vision_text = force_expand_abbreviations(vision_description)
+                    page_final_blocks.append(expanded_vision_text)
 
         combined_page_text = "\n\n".join(page_final_blocks)
 
