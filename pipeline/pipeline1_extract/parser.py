@@ -64,10 +64,10 @@ def parse_pdf_pro(pdf_path, start_page=1, end_page=1):
         page_width = page.rect.width
         page_height = page.rect.height
 
-        matrix_full = fitz.Matrix(0.3, 0.3)
-        pix_full = page.get_pixmap(matrix=matrix_full)
-        img_data_full = pix_full.tobytes("jpeg")
-        full_page_pil_img = Image.open(io.BytesIO(img_data_full))
+        # matrix_full = fitz.Matrix(0.3, 0.3)
+        # pix_full = page.get_pixmap(matrix=matrix_full)
+        # img_data_full = pix_full.tobytes("jpeg")
+        # full_page_pil_img = Image.open(io.BytesIO(img_data_full))
 
         y_intervals = []
 
@@ -94,7 +94,7 @@ def parse_pdf_pro(pdf_path, start_page=1, end_page=1):
 
             for current in y_intervals[1:]:
                 previous = merged_y_intervals[-1]
-                if current[0] <= previous[1] + 40:
+                if current[0] <= previous[1] + 15:
                     previous[1] = max(previous[1], current[1])
                 else:
                     merged_y_intervals.append(current)
@@ -103,8 +103,11 @@ def parse_pdf_pro(pdf_path, start_page=1, end_page=1):
 
         for y_min, y_max in merged_y_intervals:
             try:
-                # Вырезаем область таблицы строго по обнаруженным границам (y_min, y_max)
-                crop_rect = fitz.Rect(0, y_min, page_width, y_max)
+                # Безопасные границы
+                safe_y_min = max(0, y_min)
+                safe_y_max = min(y_max, page_height)
+
+                crop_rect = fitz.Rect(0, safe_y_min, page_width, safe_y_max)
 
                 matrix = fitz.Matrix(3.0, 3.0)
                 pix = page.get_pixmap(matrix=matrix, clip=crop_rect)
@@ -113,7 +116,6 @@ def parse_pdf_pro(pdf_path, start_page=1, end_page=1):
                 raw_elements.append({
                     "type": "image",
                     "content": pil_img,
-                    "full_page_image": full_page_pil_img,
                     "y": y_min
                 })
             except Exception as e:
@@ -127,7 +129,7 @@ def parse_pdf_pro(pdf_path, start_page=1, end_page=1):
                     y_pos = page_height - bbox.t
 
                     inside_vision_zone = any(
-                        (y_min - 15) <= y_pos <= (y_max + 15) for y_min, y_max in merged_y_intervals)
+                        (y_min - 15) <= y_pos <= (y_max + 0) for y_min, y_max in merged_y_intervals)
 
                     if not inside_vision_zone:
                         raw_elements.append({
@@ -143,8 +145,10 @@ def parse_pdf_pro(pdf_path, start_page=1, end_page=1):
             if el["type"] == "text":
                 document_elements.append({"type": "text", "content": el["content"]})
             else:
-                document_elements.append(
-                    {"type": "image", "content": el["content"], "full_page_image": el["full_page_image"]})
+                document_elements.append({
+                    "type": "image",
+                    "content": el["content"]
+                })
 
         doc.close()
     finally:

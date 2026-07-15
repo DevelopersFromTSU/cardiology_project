@@ -6,7 +6,6 @@ from dotenv import load_dotenv
 from pydantic import BaseModel, Field
 from pipeline.pipeline1_extract.parser import parse_pdf_pro
 from pipeline.pipeline1_extract.vision import describe_image
-from pipeline.pipeline1_extract.refiner import refine_medical_chunk
 from pipeline.utils.abbreviations import force_expand_abbreviations
 from pipeline.pipeline1_extract.refiner import refine_medical_chunk, generate_page_metadata
 
@@ -64,14 +63,14 @@ def run_pipeline(book_path, output_folder, start_page, end_page):
                     if refined_data["refined_text"].strip():
                         page_final_blocks.append(refined_data["refined_text"])
 
+
             elif item["type"] == "image":
                 crop_img = item["content"]
-                full_page_img = item.get("full_page_image")
+                # [УДАЛЕНО]: full_page_img = item.get("full_page_image")
 
-                # [НОВОЕ]: Передаем словарь состояния и принимаем ровно 3 переменные
+                # Оставляем только самую суть:
                 vision_description, extracted_table_title, extracted_state = describe_image(
                     crop_img,
-                    full_page_img=full_page_img,
                     previous_table_title=last_table_title,
                     previous_row_state=last_row_state
                 )
@@ -126,6 +125,6 @@ if __name__ == "__main__":
     run_pipeline(
         book_path=book_path,
         output_folder=output_folder,
-        start_page=212,
-        end_page=212
+        start_page=174,
+        end_page=174
     )
