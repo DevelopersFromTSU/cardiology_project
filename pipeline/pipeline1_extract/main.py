@@ -116,15 +116,25 @@ if __name__ == "__main__":
 
     BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
+    # Получаем полный путь к книге
     raw_book_path = os.getenv("BOOK_PATH", "")
     book_path = os.path.normpath(os.path.join(BASE_DIR, raw_book_path))
 
-    raw_result_dir = os.getenv("RESULT_DIR", "./result")
-    output_folder = os.path.normpath(os.path.join(BASE_DIR, raw_result_dir))
+    # --- [НОВОЕ]: Извлекаем имя книги без расширения (.pdf) ---
+    book_filename = os.path.basename(book_path)        # Например: "kardiologia.pdf"
+    book_name = os.path.splitext(book_filename)[0]     # Например: "kardiologia"
 
+    # Получаем базовую папку result
+    raw_result_dir = os.getenv("RESULT_DIR", "./result")
+    base_output_folder = os.path.normpath(os.path.join(BASE_DIR, raw_result_dir))
+
+    # --- [НОВОЕ]: Добавляем имя книги к пути result ---
+    final_output_folder = os.path.join(base_output_folder, book_name)
+
+    # Запускаем пайплайн с новой папкой
     run_pipeline(
         book_path=book_path,
-        output_folder=output_folder,
-        start_page=174,
-        end_page=174
+        output_folder=final_output_folder, # Передаем обновленный путь
+        start_page=180,
+        end_page=180
     )

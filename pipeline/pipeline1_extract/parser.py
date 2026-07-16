@@ -103,9 +103,9 @@ def parse_pdf_pro(pdf_path, start_page=1, end_page=1):
 
         for y_min, y_max in merged_y_intervals:
             try:
-                # Безопасные границы
-                safe_y_min = max(0, y_min)
-                safe_y_max = min(y_max, page_height)
+                # НОВЫЕ СТРОЧКИ: Добавляем отступы, чтобы не обрезать прилегающий текст
+                safe_y_min = max(0, y_min - 10)
+                safe_y_max = min(y_max + 25, page_height)
 
                 crop_rect = fitz.Rect(0, safe_y_min, page_width, safe_y_max)
 
