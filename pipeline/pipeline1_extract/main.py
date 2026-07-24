@@ -135,6 +135,6 @@ if __name__ == "__main__":
     run_pipeline(
         book_path=book_path,
         output_folder=final_output_folder, # Передаем обновленный путь
-        start_page=180,
-        end_page=180
+        start_page=188,
+        end_page=188
     )

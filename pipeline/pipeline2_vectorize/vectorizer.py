@@ -1,6 +1,6 @@
 import os
 import json
-import uuid
+import argparse
 import re
 from dotenv import load_dotenv
 from qdrant_client import QdrantClient
@@ -73,34 +73,31 @@ def get_global_chunks_with_pages(page_files_data, chunk_size=4000, chunk_overlap
     return chunks_with_metadata
 
 
-def upload_chunks_to_qdrant(chunks, qdrant_client, embedding_model, collection_name):
-    """
-    [НОВОЕ]: Пакетная векторизация и загрузка всех чанков документа.
-    """
+import uuid
+
+# Добавили аргумент book_name
+def upload_chunks_to_qdrant(chunks, qdrant_client, embedding_model, collection_name, book_name):
     print(f"🔄 Подготовка к загрузке {len(chunks)} чанков в Qdrant...")
 
     for i, chunk in enumerate(chunks, 1):
         chunk_text = chunk.page_content
         page_num = chunk.metadata.get("page", 0)
 
-        # Получаем плотный и разреженный векторы за один проход BGE-M3
         outputs = embedding_model.encode([chunk_text], return_dense=True, return_sparse=True)
-
         dense_vec = outputs['dense_vecs'][0].tolist()
         sparse_dict = outputs['lexical_weights'][0]
-
         sparse_vec = models.SparseVector(
             indices=[int(k) for k in sparse_dict.keys()],
             values=[float(v) for v in sparse_dict.values()]
         )
 
+        # НОВОЕ: Генерируем постоянный ID с учетом имени книги!
+        stable_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"{collection_name}_{book_name}_chunk_{i}"))
+
         point = models.PointStruct(
-            id=str(uuid.uuid4()),
-            vector={
-                "dense": dense_vec,
-                "sparse": sparse_vec
-            },
-            payload={"text": chunk_text, "page": page_num}
+            id=stable_id,
+            vector={"dense": dense_vec, "sparse": sparse_vec},
+            payload={"text": chunk_text, "page": page_num, "book": book_name} # Добавили тег книги в payload
         )
         qdrant_client.upsert(collection_name=collection_name, points=[point])
         print(f"✅ Загружен чанк {i}/{len(chunks)} (Страница {page_num})")
@@ -109,8 +106,14 @@ def upload_chunks_to_qdrant(chunks, qdrant_client, embedding_model, collection_n
 if __name__ == "__main__":
     load_dotenv()
 
+    # НОВОЕ: Парсим аргументы командной строки
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--book", type=str, required=True, help="Название папки с книгой")
+    args = parser.parse_args()
+
     BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    json_folder = os.path.join(BASE_DIR, "result")
+    # НОВОЕ: Путь теперь ведет не просто в result, а в конкретную папку книги
+    json_folder = os.path.join(BASE_DIR, "result", args.book)
     collection_name = os.getenv("COLLECTION_NAME", "medical_docs")
 
     qdrant = QdrantClient(url=os.getenv("QDRANT_URL", "http://localhost:6333"))
@@ -129,7 +132,6 @@ if __name__ == "__main__":
             }
         )
 
-    # 1. Читаем все файлы страниц в память и сортируем по номеру страницы
     if os.path.exists(json_folder):
         files = sorted([f for f in os.listdir(json_folder) if f.endswith('.json')])
         page_files_data = []
@@ -150,9 +152,8 @@ if __name__ == "__main__":
         # Сортируем строго по возрастанию номеров страниц (page_1, page_2, ..., page_10)
         page_files_data.sort(key=lambda x: x[0])
 
-        # 2. Генерируем чанки со сквозным нахлестом по всему документу
         all_chunks = get_global_chunks_with_pages(page_files_data)
 
-        # 3. Отправляем в базу
-        upload_chunks_to_qdrant(all_chunks, qdrant, model, collection_name)
+        # Передаем название книги (args.book) в загрузчик
+        upload_chunks_to_qdrant(all_chunks, qdrant, model, collection_name, args.book)
         print("🎉 Векторизация и загрузка успешно завершены!")
