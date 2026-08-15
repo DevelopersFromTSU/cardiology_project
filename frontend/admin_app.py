@@ -25,23 +25,20 @@ def extract_page_number(filename):
     return int(match.group(1)) if match else 0
 
 
-# --- Пользовательские CSS стили для улучшения читабельности ---
+# --- Пользовательские CSS стили ---
 st.markdown(
     """
     <style>
-    /* Настраиваем многострочное поле (Очищенный текст) */
     div.stTextArea textarea {
-        font-size: 16px !important;       /* Увеличиваем базовый размер шрифта */
-        line-height: 1.6 !important;      /* Добавляем "воздух" между строками */
-        font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif !important; /* Ставим мягкий системный шрифт */
-        padding: 15px !important;         /* Добавляем внутренние отступы от краев рамки */
-        font-weight: 400 !important;      /* Делаем начертание чуть более четким */
+        font-size: 16px !important;
+        line-height: 1.6 !important;
+        font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif !important;
+        padding: 15px !important;
+        font-weight: 400 !important;
     }
-
-    /* Настраиваем однострочные поля (Тема и Теги) */
     div.stTextInput input {
-        font-size: 15px !important;       /* Чуть увеличиваем заголовки для гармонии */
-        font-weight: 500 !important;      /* Делаем их слегка полужирными */
+        font-size: 15px !important;
+        font-weight: 500 !important;
     }
     </style>
     """,
@@ -60,8 +57,20 @@ with tab_edit:
 
     books = [d.name for d in RESULT_DIR.iterdir() if d.is_dir()]
 
+    # ЗАДАЧА 1: Инициализация переменных сессии для навигации
+    if "current_page_index" not in st.session_state:
+        st.session_state.current_page_index = 0
+    if "selected_book" not in st.session_state:
+        st.session_state.selected_book = None
+
     if books:
         selected_book = st.selectbox("📚 Выберите обработанную книгу", books)
+
+        # Если книгу переключили — сбрасываем счетчик страниц на 0
+        if st.session_state.selected_book != selected_book:
+            st.session_state.selected_book = selected_book
+            st.session_state.current_page_index = 0
+
         book_path = RESULT_DIR / selected_book
 
         json_files = sorted(
@@ -70,48 +79,111 @@ with tab_edit:
         )
 
         if json_files:
-            selected_file = st.selectbox(
-                "📄 Выберите страницу",
-                options=json_files,
-                format_func=lambda x: f"Страница {extract_page_number(x)}"
-            )
+            # Защита от выхода за пределы списка
+            if st.session_state.current_page_index >= len(json_files):
+                st.session_state.current_page_index = len(json_files) - 1
+
+
+            # Функция для отображения галочки в SelectBox (ЗАДАЧА 3)
+            def format_page_name(filename):
+                page_num = extract_page_number(filename)
+                try:
+                    with open(book_path / filename, "r", encoding="utf-8") as temp_f:
+                        temp_data = json.load(temp_f)
+
+                        # 1. Если страница проверена человеком — всё супер
+                        if temp_data.get("is_verified", False):
+                            return f"✅ Страница {page_num}"
+
+                        # 2. Если на этапе парсинга произошел сбой — подсвечиваем!
+                        if temp_data.get("analysis_status") == "warning":
+                            errors = ", ".join(temp_data.get("errors", []))
+                            return f"⚠️ Страница {page_num} ({errors})"
+
+                except Exception:
+                    pass
+                return f"📄 Страница {page_num}"
+
+
+            # ЗАДАЧА 1: Навигация
+            nav_col1, nav_col2, nav_col3 = st.columns([1, 2, 1])
+
+            with nav_col1:
+                st.write("")
+                st.write("")
+                if st.button("⬅️ Предыдущая", use_container_width=True):
+                    if st.session_state.current_page_index > 0:
+                        st.session_state.current_page_index -= 1
+                        st.rerun()
+
+            with nav_col2:
+                selected_file = st.selectbox(
+                    "Выберите страницу",
+                    options=json_files,
+                    index=st.session_state.current_page_index,
+                    format_func=format_page_name
+                )
+
+            with nav_col3:
+                st.write("")
+                st.write("")
+                if st.button("Следующая ➡️", type="primary", use_container_width=True):
+                    if st.session_state.current_page_index < len(json_files) - 1:
+                        st.session_state.current_page_index += 1
+                        st.rerun()
+
+            # Синхронизируем ручной выбор из selectbox с глобальным индексом сессии
+            current_selected_index = json_files.index(selected_file)
+            if current_selected_index != st.session_state.current_page_index:
+                st.session_state.current_page_index = current_selected_index
+                st.rerun()
+
             file_path = book_path / selected_file
 
             with open(file_path, "r", encoding="utf-8") as f:
                 page_data = json.load(f)
 
-                # Разделяем экран на две СТРОГО равные колонки (50% и 50% ширины)
                 col_text, col_img = st.columns(2)
 
-                # ЛЕВАЯ КОЛОНКА: Редактор JSON (col_text идет первой)
                 with col_text:
                     st.subheader("📝 Редактирование данных")
 
-                    # Оберните поля ввода в st.form с уникальным ключом
-                    with st.form(key=f"edit_form_{selected_book}_{selected_file}"):
-                        new_topic = st.text_input("Тема страницы (topic)", page_data.get("topic", ""))
-                        new_tags = st.text_input("Теги (tags)", page_data.get("tags", ""))
+                    # ЗАДАЧА 2: Вкладки для разделения сырого текста и Markdown-превью
+                    editor_tab, preview_tab = st.tabs(["✏️ Редактор", "👁️ Превью Markdown"])
 
-                        # Текстовое поле больше не будет триггерить перезагрузку при потере фокуса
-                        new_text = st.text_area("Очищенный текст (refined_text)", page_data.get("refined_text", ""),
-                                                height=800)
+                    with editor_tab:
+                        with st.form(key=f"edit_form_{selected_book}_{selected_file}"):
+                            new_topic = st.text_input("Тема страницы (topic)", page_data.get("topic", ""))
+                            new_tags = st.text_input("Теги (tags)", page_data.get("tags", ""))
+                            new_text = st.text_area("Очищенный текст (refined_text)", page_data.get("refined_text", ""),
+                                                    height=600)
 
-                        # Внутри формы обязательно нужно использовать st.form_submit_button вместо st.button
-                        submit_button = st.form_submit_button("💾 Сохранить изменения в JSON", use_container_width=True)
+                            # ЗАДАЧА 3: Маркер верификации
+                            is_verified = st.checkbox("✅ Подтверждаю, что страница проверена и готова для базы",
+                                                      value=page_data.get("is_verified", False))
 
-                        if submit_button:
-                            page_data["topic"] = new_topic
-                            page_data["tags"] = new_tags
-                            page_data["refined_text"] = new_text
+                            submit_button = st.form_submit_button("💾 Сохранить изменения в JSON",
+                                                                  use_container_width=True)
 
-                            with open(file_path, "w", encoding="utf-8") as f:
-                                json.dump(page_data, f, ensure_ascii=False, indent=4)
-                            st.success("Файл успешно обновлен!")
+                            if submit_button:
+                                page_data["topic"] = new_topic
+                                page_data["tags"] = new_tags
+                                page_data["refined_text"] = new_text
+                                page_data["is_verified"] = is_verified
+                                with open(file_path, "w", encoding="utf-8") as save_f:
+                                    json.dump(page_data, save_f, ensure_ascii=False, indent=4)
+                                st.success("Файл успешно обновлен!")
+                                st.rerun()  # Обновляем UI, чтобы галочка появилась в SelectBox
 
-                # ПРАВАЯ КОЛОНКА: Скриншот оригинала (col_img идет второй)
+                    with preview_tab:
+                        # Отрисовываем так, как текст "увидит" векторная БД и LLM
+                        st.markdown(f"### Тема: {page_data.get('topic', 'Без темы')}")
+                        st.caption(f"**Теги:** {page_data.get('tags', 'Нет тегов')}")
+                        st.divider()
+                        st.markdown(page_data.get("refined_text", ""))
+
                 with col_img:
-                    st.subheader("👁️ Оригинал страницы")
-
+                    st.subheader("🖼️ Оригинал страницы")
                     pdf_path = DATA_DIR / f"{selected_book}.pdf"
                     page_num = extract_page_number(selected_file)
 
@@ -123,11 +195,8 @@ with tab_edit:
                         try:
                             doc = fitz.open(pdf_path)
                             page = doc[page_num - 1]
-
                             pix = page.get_pixmap(matrix=fitz.Matrix(2.0, 2.0))
                             img = Image.open(io.BytesIO(pix.tobytes("png")))
-
-                            # Картинка автоматически займет 100% ширины правой колонки
                             st.image(img, use_container_width=True)
                             doc.close()
                         except Exception as e:
@@ -139,7 +208,6 @@ with tab_edit:
 with tab_upload:
     st.header("Управление книгами (Папка data)")
 
-    # Блок загрузки нового PDF
     uploaded_file = st.file_uploader("📥 Если нужной книги нет, загрузите PDF сюда:", type=["pdf"])
     if uploaded_file:
         save_path = DATA_DIR / uploaded_file.name
@@ -149,26 +217,64 @@ with tab_upload:
 
     st.divider()
 
-    # Блок выбора книги и парсинга
     pdf_files = [f.name for f in DATA_DIR.iterdir() if f.name.endswith('.pdf')]
 
     if pdf_files:
         selected_pdf = st.selectbox("📖 Выберите книгу из папки data для парсинга", pdf_files)
 
-        # Настройка диапазона страниц
         col1, col2 = st.columns(2)
         with col1:
             start_page = st.number_input("Начальная страница", min_value=1, value=1)
         with col2:
             end_page = st.number_input("Конечная страница", min_value=1, value=5)
 
-        if st.button("▶️ Запустить парсинг (main.py)"):
-            with st.spinner(f"Идет обработка страниц {start_page}-{end_page}. Пожалуйста, подождите..."):
-                # Добавляем корень проекта в системный путь, чтобы импорты в main.py не сломались
+        if "current_parsing_page" not in st.session_state:
+            st.session_state.current_parsing_page = None
+
+        if st.session_state.current_parsing_page is None:
+            # Кнопка старта
+            if st.button("▶️ Запустить парсинг (main.py)", use_container_width=True):
+                st.session_state.current_parsing_page = start_page
+                st.rerun()
+        else:
+            current = st.session_state.current_parsing_page
+
+            # Прогресс-бар и статус
+            progress = (current - start_page) / (end_page - start_page + 1) if end_page >= start_page else 1.0
+            st.progress(progress, text=f"⏳ Идет обработка страницы {current} из {end_page}...")
+
+            # Кнопка СТОП
+            if st.button("🛑 Остановить парсинг", type="primary", use_container_width=True):
+                st.session_state.current_parsing_page = None
+                st.error("Парсинг был принудительно остановлен пользователем.")
+                st.rerun()
+
+            st.markdown("### 🖥️ Живой лог обработки:")
+            log_container = st.empty()
+
+
+            # Класс для перехвата print()
+            class StreamlitConsole:
+                def __init__(self, placeholder):
+                    self.placeholder = placeholder
+                    self.buffer = []
+
+                def write(self, text):
+                    if text.strip():
+                        self.buffer.append(text.strip())
+                        display_text = "\n".join(self.buffer[-20:])
+                        self.placeholder.code(display_text, language="bash")
+
+                def flush(self):
+                    pass
+
+
+            old_stdout = sys.stdout
+            sys.stdout = StreamlitConsole(log_container)
+
+            try:
                 if str(BASE_DIR) not in sys.path:
                     sys.path.append(str(BASE_DIR))
-
-                # Импорт именно из нужной папки, опираясь на скриншот
                 from pipeline.pipeline1_extract.main import run_pipeline
 
                 book_path = DATA_DIR / selected_pdf
@@ -178,10 +284,23 @@ with tab_upload:
                 run_pipeline(
                     book_path=str(book_path),
                     output_folder=str(output_folder),
-                    start_page=int(start_page),
-                    end_page=int(end_page)
+                    start_page=current,
+                    end_page=current
                 )
-                st.success(f"Парсинг завершен! Результаты сохранены в папку {book_name}")
+            except Exception as e:
+                print(f"❌ Возникла критическая ошибка: {e}")
+            finally:
+                sys.stdout = old_stdout
+
+            if current < end_page:
+                st.session_state.current_parsing_page += 1
+                st.rerun()
+            else:
+                st.session_state.current_parsing_page = None
+                st.success(f"✅ Парсинг успешно завершен! Результаты в папке {book_name}")
+                if st.button("Ок, скрыть логи"):
+                    st.rerun()
+
     else:
         st.info("Папка data пуста. Пожалуйста, загрузите PDF-файл.")
 
@@ -189,7 +308,6 @@ with tab_upload:
 with tab_export:
     st.header("Векторизация и загрузка в Qdrant")
 
-    # Ищем папки с обработанными книгами
     books_for_export = [d.name for d in RESULT_DIR.iterdir() if d.is_dir()]
 
     if books_for_export:
@@ -197,17 +315,13 @@ with tab_export:
 
         if st.button("🚀 Запустить vectorizer.py для выбранной книги"):
             with st.spinner(f"Создание эмбеддингов для '{selected_export_book}' и отправка в БД..."):
-
                 vectorizer_script = PIPELINE_DIR / "pipeline2_vectorize" / "vectorizer.py"
-
-                # Добавляем аргумент --book при вызове скрипта
                 result = subprocess.run(
                     ["python", str(vectorizer_script), "--book", selected_export_book],
                     cwd=str(BASE_DIR),
                     capture_output=True,
                     text=True
                 )
-
                 if result.returncode == 0:
                     st.success(f"Данные книги '{selected_export_book}' успешно загружены в базу!")
                     st.code(result.stdout)

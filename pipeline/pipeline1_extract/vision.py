@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 import cv2
 import numpy as np
 from PIL import Image, ImageEnhance, ImageFilter
+import time
 
 load_dotenv()
 
@@ -124,7 +125,7 @@ class ImageExtraction(BaseModel):
 
 
 # [ИСПРАВЛЕНО]: Легкая классификация картинки перед тяжелым разбором
-def classify_image_category(pil_img) -> ImageCategory:
+def classify_image_category(pil_img, max_retries=3) -> ImageCategory:
     client = genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
 
     sys_instr = (
@@ -139,24 +140,33 @@ def classify_image_category(pil_img) -> ImageCategory:
         response_schema=ImageRouter,
     )
 
-    try:
-        print("🔍 LLM-роутер: классифицирую изображение...")
-        response = client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=[pil_img, "Определи категорию изображения."],
-            config=config
-        )
-        # [НОВОЕ]: Логирование токенов роутера
-        if response.usage_metadata:
-            print(f"📊 [Роутер] Токены -> Вход: {response.usage_metadata.prompt_token_count} | "
-                  f"Выход: {response.usage_metadata.candidates_token_count} | "
-                  f"Всего: {response.usage_metadata.total_token_count}")
-        data = json.loads(response.text)
-        return ImageCategory(data.get("category", ImageCategory.TEXT_TABLE))
-    except Exception as e:
-        print(f"⚠️ Ошибка роутера: {e}. Откат на класс по умолчанию (text_table).")
-        return ImageCategory.TEXT_TABLE
+    # Запускаем цикл попыток
+    for attempt in range(max_retries):
+        try:
+            print(f"🔍 LLM-роутер: классифицирую изображение (попытка {attempt + 1}/{max_retries})...")
+            response = client.models.generate_content(
+                model="gemini-3.5-flash-lite",
+                contents=[pil_img, "Определи категорию изображения."],
+                config=config
+            )
 
+            # Логирование токенов роутера
+            if response.usage_metadata:
+                print(f"📊 [Роутер] Токены -> Вход: {response.usage_metadata.prompt_token_count} | "
+                      f"Выход: {response.usage_metadata.candidates_token_count} | "
+                      f"Всего: {response.usage_metadata.total_token_count}")
+
+            data = json.loads(response.text)
+            return ImageCategory(data.get("category", ImageCategory.TEXT_TABLE))
+
+        except Exception as e:
+            print(f"⚠️ Ошибка роутера (попытка {attempt + 1}/{max_retries}): {e}")
+            if attempt < max_retries - 1:
+                print("🔄 Ждем 5 секунд и повторяем запрос к API...")
+                time.sleep(5)  # Пауза перед следующей попыткой
+            else:
+                print("❌ Все попытки исчерпаны. Откат на класс по умолчанию (text_table).")
+                return ImageCategory.TEXT_TABLE
 
 def slice_image_smart_opencv(pil_img):
     open_cv_image = np.array(pil_img)
@@ -260,7 +270,7 @@ def describe_image(pil_img, previous_table_title=None, previous_row_state=None):
     )
 
     # --- [НОВЫЕ СТРОЧКИ]: Динамический выбор модели ---
-    target_model = "gemini-2.5-flash" if category == ImageCategory.TEXT_TABLE else "gemini-3.5-flash"
+    target_model = "gemini-3.5-flash-lite" if category == ImageCategory.TEXT_TABLE else "gemini-3.6-flash"
     print(f"🤖 Для генерации выбрана модель: {target_model}")
     # --------------------------------------------------
 

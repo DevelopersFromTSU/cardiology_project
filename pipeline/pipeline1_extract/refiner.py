@@ -32,7 +32,7 @@ def get_gemini_client():
 
 def refine_medical_chunk(chunk_text, max_retries=3):
     client = get_gemini_client()
-    model_id = "gemini-2.5-flash"
+    model_id = "gemini-3.5-flash-lite"
 
     # [ИСПРАВЛЕНО]: Убрали ручные инструкции по формату JSON
     sys_instr = (
@@ -79,7 +79,7 @@ def refine_medical_chunk(chunk_text, max_retries=3):
 
 def generate_page_metadata(page_text, previous_topic=None, max_retries=3):
     client = get_gemini_client()
-    model_id = "gemini-2.5-flash"
+    model_id = "gemini-3.5-flash-lite"
 
     context_hint = ""
     if previous_topic:

@@ -40,13 +40,22 @@ def save_chunk_to_folder(chunk_data, filename, folder_name):
 def run_pipeline(book_path, output_folder, start_page, end_page):
     last_table_title = None
     last_row_state = {}
-    previous_page_topic = None  # [НОВОЕ]: Память о теме прошлой страницы
+    previous_page_topic = None
+
+    SHORT_TEXT_THRESHOLD = 150  # Порог длины текста (в символах)
+    # ----------------------------------------------------
 
     for current_page in range(start_page, end_page + 1):
+        # ... начало цикла for current_page in range(start_page, end_page + 1): ...
         print(f"\n🔄 Начинаем обработку страницы {current_page}...")
 
         document_elements = parse_pdf_pro(book_path, current_page, current_page)
         page_final_blocks = []
+
+        # --- НОВЫЕ ПЕРЕМЕННЫЕ ДЛЯ ТРЕКИНГА ОШИБОК ---
+        page_status = "success"
+        page_errors = []
+        # -------------------------------------------
 
         for item in document_elements:
             if item["type"] == "text":
@@ -55,27 +64,32 @@ def run_pipeline(book_path, output_folder, start_page, end_page):
                 table_match = re.search(r'(Таблица\s+[\w\.\-/]+[^\n]+)', text_expanded, re.IGNORECASE)
                 if table_match:
                     last_table_title = table_match.group(1).strip()
-                    last_row_state = {}  # [НОВОЕ]: Полностью сбрасываем словарь состояния при начале новой таблицы
+                    last_row_state = {}
 
                 refined_data = refine_medical_chunk(text_expanded)
 
-                if isinstance(refined_data, dict) and "refined_text" in refined_data:
+                # --- НОВАЯ ЛОГИКА: ПРОВЕРКА ОШИБКИ ТЕКСТА ---
+                if refined_data is None:
+                    page_status = "warning"
+                    page_errors.append("Сбой Gemini при обработке текста")
+                elif isinstance(refined_data, dict) and "refined_text" in refined_data:
                     if refined_data["refined_text"].strip():
                         page_final_blocks.append(refined_data["refined_text"])
 
-
             elif item["type"] == "image":
                 crop_img = item["content"]
-                # [УДАЛЕНО]: full_page_img = item.get("full_page_image")
-
-                # Оставляем только самую суть:
                 vision_description, extracted_table_title, extracted_state = describe_image(
                     crop_img,
                     previous_table_title=last_table_title,
                     previous_row_state=last_row_state
                 )
 
-                # Обновляем состояние памяти для следующих страниц
+                # --- НОВАЯ ЛОГИКА: ПРОВЕРКА ОШИБКИ КАРТИНКИ ---
+                # Если vision вернул пустую строку, значит произошел сбой
+                if not vision_description.strip():
+                    page_status = "warning"
+                    page_errors.append("Сбой Gemini при анализе изображения")
+
                 if extracted_table_title:
                     last_table_title = extracted_table_title
                 if extracted_state and isinstance(extracted_state, dict):
@@ -85,56 +99,41 @@ def run_pipeline(book_path, output_folder, start_page, end_page):
                     expanded_vision_text = force_expand_abbreviations(vision_description)
                     page_final_blocks.append(expanded_vision_text)
 
-        combined_page_text = "\n\n".join(page_final_blocks)
+        # Объединяем блоки текущей страницы...
+        combined_page_text = "\n\n".join(page_final_blocks).strip()
 
-        # [НОВОЕ]: Генерируем метаданные, если страница не пустая
-        page_topic = "Не определена"
-        page_tags = "Нет тегов"
+        if not combined_page_text:
+            continue
 
-        if combined_page_text.strip():
-            print("⏳ Генерация метаданных страницы (тема и теги)...")
-            metadata = generate_page_metadata(combined_page_text, previous_page_topic)
-            page_topic = metadata.get("topic", "Не определена")
-            page_tags = metadata.get("tags", "Нет тегов")
-            previous_page_topic = page_topic  # Сохраняем тему для следующей итерации
+        # ... (Блок с SHORT_TEXT_THRESHOLD остается без изменений) ...
 
+        print("⏳ Генерация метаданных страницы (тема и теги)...")
+        metadata = generate_page_metadata(combined_page_text, previous_page_topic)
+
+        # --- НОВАЯ ЛОГИКА: ПРОВЕРКА ОШИБКИ МЕТАДАННЫХ ---
+        # Если метаданные вернули дефолтную заглушку из refiner.py
+        if metadata.get("topic") == "Медицинские данные":
+            page_status = "warning"
+            page_errors.append("Сбой генерации метаданных (fallback)")
+
+        page_topic = metadata.get("topic", "Не определена")
+        page_tags = metadata.get("tags", "Нет тегов")
+        previous_page_topic = page_topic
+
+        # --- ОБНОВЛЕННЫЙ JSON ПЕЙЛОАД ---
         final_json_payload = {
             "page": current_page,
-            "analysis_status": "success" if combined_page_text.strip() else "failed",
-            "topic": page_topic,  # [НОВОЕ]: Добавляем тему в JSON
-            "tags": page_tags,  # [НОВОЕ]: Добавляем теги в JSON
+            "analysis_status": page_status,  # Динамический статус (success или warning)
+            "errors": page_errors,  # Сохраняем причину сбоя в файл
+            "topic": page_topic,
+            "tags": page_tags,
             "refined_text": combined_page_text
         }
 
-        if combined_page_text.strip():
-            save_chunk_to_folder(final_json_payload, f"page_{current_page}.json", output_folder)
-            print(f"✅ Страница {current_page} успешно сохранена без потери слов и разрывов.")
+        save_chunk_to_folder(final_json_payload, f"page_{current_page}.json", output_folder)
+        print(f"✅ Страница {current_page} успешно сохранена.")
 
+        # --- [НОВОЕ]: Запоминаем текущую страницу для следующих итераций ---
+        last_saved_payload = final_json_payload
+        last_saved_page_num = current_page
 
-if __name__ == "__main__":
-    load_dotenv()
-
-    BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-
-    # Получаем полный путь к книге
-    raw_book_path = os.getenv("BOOK_PATH", "")
-    book_path = os.path.normpath(os.path.join(BASE_DIR, raw_book_path))
-
-    # --- [НОВОЕ]: Извлекаем имя книги без расширения (.pdf) ---
-    book_filename = os.path.basename(book_path)        # Например: "kardiologia.pdf"
-    book_name = os.path.splitext(book_filename)[0]     # Например: "kardiologia"
-
-    # Получаем базовую папку result
-    raw_result_dir = os.getenv("RESULT_DIR", "./result")
-    base_output_folder = os.path.normpath(os.path.join(BASE_DIR, raw_result_dir))
-
-    # --- [НОВОЕ]: Добавляем имя книги к пути result ---
-    final_output_folder = os.path.join(base_output_folder, book_name)
-
-    # Запускаем пайплайн с новой папкой
-    run_pipeline(
-        book_path=book_path,
-        output_folder=final_output_folder, # Передаем обновленный путь
-        start_page=188,
-        end_page=188
-    )
