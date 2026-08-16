@@ -6,13 +6,12 @@ import subprocess
 import sys
 from pathlib import Path
 
-# 1. Строим правильные пути с учетом папки pipeline
+# 1. Настройка путей относительно проекта
 BASE_DIR = Path(__file__).resolve().parent.parent
 PIPELINE_DIR = BASE_DIR / "pipeline"
 RESULT_DIR = PIPELINE_DIR / "result"
 DATA_DIR = PIPELINE_DIR / "data"
 
-# Принудительно создаем папки, если их случайно удалили
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 RESULT_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -25,7 +24,7 @@ def extract_page_number(filename):
     return int(match.group(1)) if match else 0
 
 
-# --- Пользовательские CSS стили ---
+# --- Пользовательские стили ---
 st.markdown(
     """
     <style>
@@ -57,7 +56,6 @@ with tab_edit:
 
     books = [d.name for d in RESULT_DIR.iterdir() if d.is_dir()]
 
-    # ЗАДАЧА 1: Инициализация переменных сессии для навигации
     if "current_page_index" not in st.session_state:
         st.session_state.current_page_index = 0
     if "selected_book" not in st.session_state:
@@ -66,7 +64,6 @@ with tab_edit:
     if books:
         selected_book = st.selectbox("📚 Выберите обработанную книгу", books)
 
-        # Если книгу переключили — сбрасываем счетчик страниц на 0
         if st.session_state.selected_book != selected_book:
             st.session_state.selected_book = selected_book
             st.session_state.current_page_index = 0
@@ -79,33 +76,24 @@ with tab_edit:
         )
 
         if json_files:
-            # Защита от выхода за пределы списка
             if st.session_state.current_page_index >= len(json_files):
                 st.session_state.current_page_index = len(json_files) - 1
 
-
-            # Функция для отображения галочки в SelectBox (ЗАДАЧА 3)
             def format_page_name(filename):
                 page_num = extract_page_number(filename)
                 try:
                     with open(book_path / filename, "r", encoding="utf-8") as temp_f:
                         temp_data = json.load(temp_f)
-
-                        # 1. Если страница проверена человеком — всё супер
                         if temp_data.get("is_verified", False):
                             return f"✅ Страница {page_num}"
-
-                        # 2. Если на этапе парсинга произошел сбой — подсвечиваем!
                         if temp_data.get("analysis_status") == "warning":
                             errors = ", ".join(temp_data.get("errors", []))
                             return f"⚠️ Страница {page_num} ({errors})"
-
                 except Exception:
                     pass
                 return f"📄 Страница {page_num}"
 
-
-            # ЗАДАЧА 1: Навигация
+            # Навигация по страницам
             nav_col1, nav_col2, nav_col3 = st.columns([1, 2, 1])
 
             with nav_col1:
@@ -132,7 +120,6 @@ with tab_edit:
                         st.session_state.current_page_index += 1
                         st.rerun()
 
-            # Синхронизируем ручной выбор из selectbox с глобальным индексом сессии
             current_selected_index = json_files.index(selected_file)
             if current_selected_index != st.session_state.current_page_index:
                 st.session_state.current_page_index = current_selected_index
@@ -143,27 +130,41 @@ with tab_edit:
             with open(file_path, "r", encoding="utf-8") as f:
                 page_data = json.load(f)
 
+                # Индикатор статуса парсинга
+                status = page_data.get("analysis_status", "success")
+                errors = page_data.get("errors", [])
+
+                if status == "success" and not errors:
+                    st.success("🟢 **Статус обработки:** Успешно — данные и таблицы распознаны без сбоев.")
+                elif status == "warning" or errors:
+                    error_text = ", ".join(errors) if errors else "Обнаружены предупреждения при парсинге"
+                    st.warning(f"⚠️ **Статус обработки:** Требует внимания | **Ошибки:** {error_text}")
+                else:
+                    st.error(f"🔴 **Статус обработки:** Критический сбой ({status})")
+
                 col_text, col_img = st.columns(2)
 
                 with col_text:
                     st.subheader("📝 Редактирование данных")
-
-                    # ЗАДАЧА 2: Вкладки для разделения сырого текста и Markdown-превью
                     editor_tab, preview_tab = st.tabs(["✏️ Редактор", "👁️ Превью Markdown"])
 
                     with editor_tab:
                         with st.form(key=f"edit_form_{selected_book}_{selected_file}"):
                             new_topic = st.text_input("Тема страницы (topic)", page_data.get("topic", ""))
                             new_tags = st.text_input("Теги (tags)", page_data.get("tags", ""))
-                            new_text = st.text_area("Очищенный текст (refined_text)", page_data.get("refined_text", ""),
-                                                    height=600)
-
-                            # ЗАДАЧА 3: Маркер верификации
-                            is_verified = st.checkbox("✅ Подтверждаю, что страница проверена и готова для базы",
-                                                      value=page_data.get("is_verified", False))
-
-                            submit_button = st.form_submit_button("💾 Сохранить изменения в JSON",
-                                                                  use_container_width=True)
+                            new_text = st.text_area(
+                                "Очищенный текст (refined_text)",
+                                page_data.get("refined_text", ""),
+                                height=600
+                            )
+                            is_verified = st.checkbox(
+                                "✅ Подтверждаю, что страница проверена и готова для базы",
+                                value=page_data.get("is_verified", False)
+                            )
+                            submit_button = st.form_submit_button(
+                                "💾 Сохранить изменения в JSON",
+                                use_container_width=True
+                            )
 
                             if submit_button:
                                 page_data["topic"] = new_topic
@@ -173,10 +174,9 @@ with tab_edit:
                                 with open(file_path, "w", encoding="utf-8") as save_f:
                                     json.dump(page_data, save_f, ensure_ascii=False, indent=4)
                                 st.success("Файл успешно обновлен!")
-                                st.rerun()  # Обновляем UI, чтобы галочка появилась в SelectBox
+                                st.rerun()
 
                     with preview_tab:
-                        # Отрисовываем так, как текст "увидит" векторная БД и LLM
                         st.markdown(f"### Тема: {page_data.get('topic', 'Без темы')}")
                         st.caption(f"**Теги:** {page_data.get('tags', 'Нет тегов')}")
                         st.divider()
@@ -212,7 +212,7 @@ with tab_upload:
     if uploaded_file:
         save_path = DATA_DIR / uploaded_file.name
         with open(save_path, "wb") as f:
-            f.write(uploaded_file.getbuffer())
+            f.write(uploaded_file.getvalue())
         st.success(f"Файл {uploaded_file.name} успешно сохранен в папку data!")
 
     st.divider()
@@ -232,22 +232,18 @@ with tab_upload:
             st.session_state.current_parsing_page = None
 
         if st.session_state.current_parsing_page is None:
-            # Кнопка старта
             if st.button("▶️ Запустить парсинг (main.py)", use_container_width=True):
                 st.session_state.current_parsing_page = start_page
                 st.rerun()
         else:
             current = st.session_state.current_parsing_page
 
-            # --- [ИСПРАВЛЕНИЕ 1]: Создаем пустые контейнеры для виджетов ---
             progress_placeholder = st.empty()
             stop_btn_placeholder = st.empty()
 
-            # Рисуем прогресс-бар ВНУТРИ контейнера
             progress = (current - start_page) / (end_page - start_page + 1) if end_page >= start_page else 1.0
             progress_placeholder.progress(progress, text=f"⏳ Идет обработка страницы {current} из {end_page}...")
 
-            # Рисуем кнопку СТОП ВНУТРИ контейнера
             if stop_btn_placeholder.button("🛑 Остановить парсинг", type="primary", use_container_width=True):
                 st.session_state.current_parsing_page = None
                 st.error("Парсинг был принудительно остановлен пользователем.")
@@ -256,7 +252,6 @@ with tab_upload:
             st.markdown("### 🖥️ Живой лог обработки:")
             log_container = st.empty()
 
-            # Класс для перехвата print()
             class StreamlitConsole:
                 def __init__(self, placeholder):
                     self.placeholder = placeholder
@@ -294,17 +289,13 @@ with tab_upload:
             finally:
                 sys.stdout = old_stdout
 
-            # Переход к следующей странице или успешное завершение
             if current < end_page:
                 st.session_state.current_parsing_page += 1
                 st.rerun()
             else:
                 st.session_state.current_parsing_page = None
-
-                # --- [ИСПРАВЛЕНИЕ 2]: Удаляем прогресс-бар и кнопку СТОП с экрана ---
                 progress_placeholder.empty()
                 stop_btn_placeholder.empty()
-
                 st.success(f"✅ Парсинг успешно завершен! Результаты в папке {book_name}")
                 if st.button("Ок, скрыть логи"):
                     st.rerun()
