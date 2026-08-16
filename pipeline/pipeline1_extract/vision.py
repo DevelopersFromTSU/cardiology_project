@@ -198,7 +198,7 @@ def describe_image(pil_img, previous_table_title=None, previous_row_state=None, 
     category = classify_image_category(pil_img)
     print(f"🎯 Роутер определил категорию: {category.value}")
 
-    use_opencv = category in ImageCategory.MATRIX
+    use_opencv = (category == ImageCategory.MATRIX)
     specialized_prompt = PROMPTS_MAP.get(category, PROMPT_TEXT_TABLE)
 
     continuation_prompt = ""
@@ -272,8 +272,8 @@ def describe_image(pil_img, previous_table_title=None, previous_row_state=None, 
             data = json.loads(response.text)
 
             if data.get("analysis_status") == "success" and (data.get("facts") or data.get("diagram_summary") or data.get("plain_text_blocks")):
-                global_ctx = data.get("global_context", "").strip()
-                source_type = data.get("source_type", "")
+                global_ctx = str(data.get("global_context") or "").strip()
+                source_type = str(data.get("source_type") or "").strip()
 
                 raw_row_list = data.get("last_row_state", [])
                 row_state = {}
@@ -287,7 +287,8 @@ def describe_image(pil_img, previous_table_title=None, previous_row_state=None, 
                     row_state = {}
 
                 current_table_title = None
-                if source_type == "таблица":
+                # Исправление 2: регистронезависимая проверка типов на русском и английском
+                if source_type.lower() in ["таблица", "table", "matrix", "text_table"]:
                     is_continuation = "продолжение" in global_ctx.lower() or len(global_ctx) < 10
                     if is_continuation and previous_table_title:
                         global_ctx = f"{previous_table_title} (Продолжение)"

@@ -10,16 +10,14 @@ from pydantic import BaseModel, Field
 load_dotenv()
 
 
-class RefinedChunkMetadata(BaseModel):
+class PageMetadata(BaseModel):
     topic: str = Field(
-        description="Главная доминирующая тема всей страницы (70-80%+ объема текста: например, образ жизни, диета, целевые показатели). Категорически запрещено брать тему из последнего предложения."
+        description="Главная доминирующая тема всей страницы (70-80%+ смыслового объема: название шкалы, матрицы, таблицы или раздела рекомендаций). Категорически запрещено брать тему из изолированных сносок, заголовков 'Пояснения', 'Ключ' или 'Содержание'."
     )
     tags: str = Field(
-        description="5-7 ключевых тегов, отражающих доминирующую тему страницы."
+        description="5-7 ключевых медицинских тегов через запятую, точно отражающих главное содержание всей страницы."
     )
-    refined_text: str = Field(
-        description="Полный обработанный текст чанка со 100% сохранением всех цифр, сносок и структуры."
-    )
+
 
 @cache
 def get_gemini_client():
@@ -31,35 +29,23 @@ def get_gemini_client():
         os.environ['HTTP_PROXY'] = http_proxy
     return genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
 
-# 2. ОБНОВЛЕННАЯ ФУНКЦИЯ: Объединили два промпта в один
-def refine_medical_chunk(chunk_text, previous_topic=None, max_retries=3):
+
+def refine_medical_chunk(chunk_text, max_retries=3):
+    """Только транскрибация и очистка сырого текста (без генерации метаданных)."""
     client = get_gemini_client()
     model_id = "gemini-3.5-flash-lite"
 
-    # Добавляем контекст из старого генератора метаданных
-    context_hint = ""
-    if previous_topic:
-        context_hint = f"\nДля справки, тема предыдущей страницы была: '{previous_topic}'. Если текущий текст выглядит как продолжение, учти это при формулировании темы."
-
     sys_instr = (
-        "Ты — строгий технический редактор и клинический дата-сайентист.\n\n"
+        "Ты — строгий технический редактор и клинический дата-сайентист.\n"
         "1. ТРАНСКРИБАЦИЯ: Переноси абсолютно весь текст на 100% со всеми цифрами, сносками и единицами измерения.\n"
-        "2. ТАБЛИЦЫ: Переписывай Markdown-таблицы в связный текст без математических стрелок ('->', '=>').\n"
+        "2. ТАБЛИЦЫ: Переписывай Markdown-таблицы в связный текст без стрелок ('->', '=>').\n"
         "3. СТРУКТУРА: Сохраняй абзацы (\\n\\n) и Markdown-заголовки (#, ##).\n"
-        "4. АББРЕВИАТУРЫ: Не изменяй и не удаляй медицинские сокращения.\n\n"
-        "5. ПРАВИЛО ВЫБОРА ТЕМЫ (TOPIC) И ТЕГОВ (TAGS) — КРИТИЧНО:\n"
-        "   - Если в тексте встречается заголовок или выделенная фраза раздела (например, 'Советы пациенту и его семье', 'Диагностика...', 'Лечение...'), ты ОБЯЗАН взять тему из этого заголовка.\n"
-        "   - Если явного заголовка нет, формулируй тему по ПЕРВОЙ ПОЛОВИНЕ текста (первые 2-3 абзаца).\n"
-        "   - СТРОЖАЙШЕ ЗАПРЕЩЕНО брать тему из последнего предложения или изолированных сносок внизу страницы.\n"
-        "   - В 'tags' перечисли термины, описывающие основное полотно текста (образ жизни, диета, соль, физическая активность, целевые уровни)."
-        f"{context_hint}"
+        "4. АББРЕВИАТУРЫ: Не изменяй и не удаляй медицинские сокращения."
     )
 
     config = types.GenerateContentConfig(
         system_instruction=sys_instr,
-        temperature=0.1,  # Немного подняли для лучшей генерации тегов
-        response_mime_type="application/json",
-        response_schema=RefinedChunkMetadata,
+        temperature=0.0,
     )
 
     for attempt in range(max_retries):
@@ -69,12 +55,49 @@ def refine_medical_chunk(chunk_text, previous_topic=None, max_retries=3):
                 contents=f"Обработай следующий текст:\n\n{chunk_text}",
                 config=config
             )
+            return response.text.strip()
+        except Exception as e:
+            print(f"⚠️ Ошибка Gemini при очистке текста (попытка {attempt + 1}/{max_retries}): {e}")
+            time.sleep(3)
+
+    return chunk_text
+
+
+def extract_page_metadata(full_page_text, previous_topic=None, max_retries=3):
+    """Генерация темы и тегов по ВСЕМУ итоговому тексту страницы (текст + таблицы + матрицы)."""
+    client = get_gemini_client()
+    model_id = "gemini-3.5-flash-lite"
+
+    context_hint = ""
+    if previous_topic:
+        context_hint = f"\nТема предыдущей страницы: '{previous_topic}'. Если текущий текст является продолжением таблицы/темы, сохрани преемственность темы."
+
+    sys_instr = (
+        "Ты — аналитик медицинских документов. Определи главную тему и теги для оцифрованной страницы клинического руководства.\n\n"
+        "ПРАВИЛА ОПРЕДЕЛЕНИЯ ТЕМЫ (TOPIC):\n"
+        "1. Оценивай СМЫСЛОВОЙ ОБЪЕМ страницы: если 80% страницы занимает матрица/таблица (например, 'Шкала SCORE2-OP' или 'Стратификация риска'), темой ОБЯЗАНА быть эта шкала/таблица, даже если внизу есть короткие пояснения.\n"
+        "2. КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО делать темой слова 'Пояснения', 'Содержание (шаблон)', 'Ключ', 'Введение', 'Сноски'.\n"
+        "3. Тема должна быть краткой, емкой и содержать клиническую суть (например: 'Шкала SCORE2-OP: Оценка сердечно-сосудистого риска у пожилых').\n"
+        f"{context_hint}"
+    )
+
+    config = types.GenerateContentConfig(
+        system_instruction=sys_instr,
+        temperature=0.0,
+        response_mime_type="application/json",
+        response_schema=PageMetadata,
+    )
+
+    for attempt in range(max_retries):
+        try:
+            response = client.models.generate_content(
+                model=model_id,
+                contents=f"Определи тему и теги для следующего текста страницы:\n\n{full_page_text[:4000]}",
+                config=config
+            )
             return json.loads(response.text)
         except Exception as e:
-            print(f"⚠️ Ошибка Gemini (попытка {attempt + 1}/{max_retries}): {e}")
-            time.sleep(5)
+            print(f"⚠️ Ошибка генерации метаданных страницы (попытка {attempt + 1}/{max_retries}): {e}")
+            time.sleep(3)
 
-    print("❌ Не удалось обработать текст после всех попыток.")
     return None
-
-# ФУНКЦИЮ generate_page_metadata УДАЛЯЕМ ПОЛНОСТЬЮ!

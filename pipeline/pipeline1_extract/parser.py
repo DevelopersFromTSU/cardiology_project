@@ -50,6 +50,7 @@ def detect_table_zones_by_lines(page, min_line_length=150):
 
 def parse_pdf_pro(pdf_path, start_page=1, end_page=1):
     temp_pdf = "temp_slice.pdf"
+    document_elements = []  # 1. Объявляем список до входа в блок try
 
     with fitz.open(pdf_path) as src:
         with fitz.open() as dest:
@@ -69,100 +70,100 @@ def parse_pdf_pro(pdf_path, start_page=1, end_page=1):
     try:
         result = converter.convert(temp_pdf)
 
-        doc = fitz.open(temp_pdf)
-        page = doc[0]
-        page_width = page.rect.width
-        page_height = page.rect.height
+        # 2. Вся работа с графикой и нарезкой помещена внутрь контекстного менеджера doc
+        with fitz.open(temp_pdf) as doc:
+            page = doc[0]
+            page_width = page.rect.width
+            page_height = page.rect.height
 
-        # matrix_full = fitz.Matrix(0.3, 0.3)
-        # pix_full = page.get_pixmap(matrix=matrix_full)
-        # img_data_full = pix_full.tobytes("jpeg")
-        # full_page_pil_img = Image.open(io.BytesIO(img_data_full))
+            y_intervals = []
 
-        y_intervals = []
+            # ЭТАП 1 — Собираем зоны от Docling
+            for item, _ in result.document.iterate_items():
+                is_table = getattr(item, "label", "") == "table"
+                has_image = hasattr(item, "image") and item.image is not None
 
-        # [ИСПРАВЛЕНО]: ЭТАП 1 — Собираем зоны от Docling
-        for item, _ in result.document.iterate_items():
-            is_table = getattr(item, "label", "") == "table"
-            has_image = hasattr(item, "image") and item.image is not None
-
-            if (has_image or is_table) and hasattr(item, "prov") and item.prov:
-                bbox = item.prov[0].bbox
-                y_top = page_height - bbox.t
-                y_bottom = page_height - bbox.b
-                y_intervals.append([min(y_top, y_bottom), max(y_top, y_bottom)])
-
-        # [НОВОЕ]: ЭТАП 1.5 — Добавляем зоны, найденные по физическим линиям сетки PDF
-        geometric_table_zones = detect_table_zones_by_lines(page)
-        y_intervals.extend(geometric_table_zones)
-
-        # ЭТАП 2 — Склеиваем близкие/пересекающиеся интервалы
-        merged_y_intervals = []
-        if y_intervals:
-            y_intervals.sort(key=lambda x: x[0])
-            merged_y_intervals = [y_intervals[0]]
-
-            for current in y_intervals[1:]:
-                previous = merged_y_intervals[-1]
-                if current[0] <= previous[1] + 15:
-                    previous[1] = max(previous[1], current[1])
-                else:
-                    merged_y_intervals.append(current)
-
-        raw_elements = []
-
-        for y_min, y_max in merged_y_intervals:
-            try:
-                # НОВЫЕ СТРОЧКИ: Добавляем отступы, чтобы не обрезать прилегающий текст
-                safe_y_min = max(0, y_min - 10)
-                safe_y_max = min(y_max + 25, page_height)
-
-                crop_rect = fitz.Rect(0, safe_y_min, page_width, safe_y_max)
-
-                matrix = fitz.Matrix(3.0, 3.0)
-                pix = page.get_pixmap(matrix=matrix, clip=crop_rect)
-                pil_img = Image.open(io.BytesIO(pix.tobytes("png")))
-
-                raw_elements.append({
-                    "type": "image",
-                    "content": pil_img,
-                    "y": y_min
-                })
-            except Exception as e:
-                print(f"⚠️ Предупреждение при склеивании картинки: {e}")
-
-        # ЭТАП 4 — Собираем чистый текст, строго отсекая всё, что попало в зоны таблиц
-        for item, _ in result.document.iterate_items():
-            if hasattr(item, "text") and item.text and getattr(item, "label", "") != "table":
-                if hasattr(item, "prov") and item.prov:
+                if (has_image or is_table) and hasattr(item, "prov") and item.prov:
                     bbox = item.prov[0].bbox
-                    y_pos = page_height - bbox.t
+                    y_top = page_height - bbox.t
+                    y_bottom = page_height - bbox.b
+                    y_intervals.append([min(y_top, y_bottom), max(y_top, y_bottom)])
 
-                    inside_vision_zone = any(
-                        (y_min - 15) <= y_pos <= (y_max + 0) for y_min, y_max in merged_y_intervals)
+            # ЭТАП 1.5 — Добавляем зоны по физическим линиям
+            geometric_table_zones = detect_table_zones_by_lines(page)
+            y_intervals.extend(geometric_table_zones)
 
-                    if not inside_vision_zone:
-                        raw_elements.append({
-                            "type": "text",
-                            "content": item.text,
-                            "y": y_pos
-                        })
+            # ЭТАП 2 — Склеиваем близкие/пересекающиеся интервалы
+            merged_y_intervals = []
+            if y_intervals:
+                y_intervals.sort(key=lambda x: x[0])
+                merged_y_intervals = [y_intervals[0]]
 
-        raw_elements.sort(key=lambda x: x["y"])
+                for current in y_intervals[1:]:
+                    previous = merged_y_intervals[-1]
+                    if current[0] <= previous[1] + 15:
+                        previous[1] = max(previous[1], current[1])
+                    else:
+                        merged_y_intervals.append(current)
 
-        document_elements = []
-        for el in raw_elements:
-            if el["type"] == "text":
-                document_elements.append({"type": "text", "content": el["content"]})
-            else:
-                document_elements.append({
-                    "type": "image",
-                    "content": el["content"]
-                })
+            raw_elements = []
 
-        doc.close()
+            # ЭТАП 3 — Нарезка картинок
+            for y_min, y_max in merged_y_intervals:
+                try:
+                    safe_y_min = max(0, y_min - 10)
+                    safe_y_max = min(y_max + 25, page_height)
+
+                    crop_rect = fitz.Rect(0, safe_y_min, page_width, safe_y_max)
+
+                    matrix = fitz.Matrix(3.0, 3.0)
+                    pix = page.get_pixmap(matrix=matrix, clip=crop_rect)
+                    pil_img = Image.open(io.BytesIO(pix.tobytes("png")))
+
+                    raw_elements.append({
+                        "type": "image",
+                        "content": pil_img,
+                        "y": y_min
+                    })
+                except Exception as e:
+                    print(f"⚠️ Предупреждение при склеивании картинки: {e}")
+
+            # ЭТАП 4 — Собираем чистый текст с синхронизированными отступами
+            for item, _ in result.document.iterate_items():
+                if hasattr(item, "text") and item.text and getattr(item, "label", "") != "table":
+                    if hasattr(item, "prov") and item.prov:
+                        bbox = item.prov[0].bbox
+                        y_pos = page_height - bbox.t
+
+                        inside_vision_zone = any(
+                            (y_min - 10) <= y_pos <= (y_max + 20) for y_min, y_max in merged_y_intervals
+                        )
+
+                        if not inside_vision_zone:
+                            raw_elements.append({
+                                "type": "text",
+                                "content": item.text,
+                                "y": y_pos
+                            })
+
+            raw_elements.sort(key=lambda x: x["y"])
+
+            for el in raw_elements:
+                if el["type"] == "text":
+                    document_elements.append({"type": "text", "content": el["content"]})
+                else:
+                    document_elements.append({
+                        "type": "image",
+                        "content": el["content"]
+                    })
+
+    except Exception as e:
+        print(f"⚠️ Ошибка при парсинге страницы: {e}")
     finally:
         if os.path.exists(temp_pdf):
-            os.remove(temp_pdf)
+            try:
+                os.remove(temp_pdf)
+            except Exception:
+                pass
 
     return document_elements
