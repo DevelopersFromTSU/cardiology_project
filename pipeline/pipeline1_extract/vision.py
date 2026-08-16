@@ -73,16 +73,6 @@ PROMPT_TEXT_TABLE = (
     "5. ЕДИНИЦЫ ИЗМЕРЕНИЯ (ИСКЛЮЧЕНИЕ ИЗ ПРАВИЛА): Если значения представлены 'голыми' цифрами, но из контекста (легенды, оси, заголовки, сноски) понятно их измерение (например, %, мг, ммоль/л), ОБЯЗАТЕЛЬНО прикрепляй эти единицы к цифрам (например, пиши '27%', а не '27')."
 )
 
-# PROMPT_ANATOMY = (
-#     "Перед тобой анатомическая или патогенетическая схема (структуры, органы, циклы).\n"
-#     "ТВОЯ ЦЕЛЬ: Сформировать базу знаний для RAG-системы. Тебе нужно переложить визуальные выноски в четкие текстовые связи.\n"
-#     "КРИТИЧЕСКИ ВАЖНЫЕ ПРАВИЛА:\n"
-#     "1. КОНТЕКСТ: В 'context' укажи название структуры/органа и характер связи ('стимулирует', 'ингибирует').\n"
-#     "2. ОПТИМИЗАЦИЯ И ГРУППИРОВКА: Если от одного органа идет несколько выносок, описывающих один процесс, объедини их в один факт. Если в выноске список симптомов — пиши их все в одно поле 'value', не дроби.\n"
-#     "3. ИЕРАРХИЯ: Включай глобальные зоны (например, 'Факторы среды') в 'context'.\n"
-#     "4. ЕДИНИЦЫ ИЗМЕРЕНИЯ (ИСКЛЮЧЕНИЕ ИЗ ПРАВИЛА): Если значения представлены 'голыми' цифрами, но из контекста (легенды, оси, заголовки, сноски) понятно их измерение (например, %, мг, ммоль/л), ОБЯЗАТЕЛЬНО прикрепляй эти единицы к цифрам (например, пиши '27%', а не '27')."
-# )
-
 
 PROMPTS_MAP = {
     ImageCategory.FLOWCHART: PROMPT_FLOWCHART,
@@ -124,9 +114,14 @@ class ImageExtraction(BaseModel):
     )
 
 
-# [ИСПРАВЛЕНО]: Легкая классификация картинки перед тяжелым разбором
 def classify_image_category(pil_img, max_retries=3) -> ImageCategory:
     client = genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
+
+    # --- НОВЫЕ СТРОЧКИ НАЧАЛО ---
+    # Создаем сильно сжатую копию специально для роутера
+    router_img = pil_img.copy()
+    router_img.thumbnail((512, 512)) # Агрессивное сжатие силуэта
+    # --- НОВЫЕ СТРОЧКИ КОНЕЦ ---
 
     sys_instr = (
         "Ты — эксперт-классификатор медицинских документов. Твоя единственная задача — посмотреть "
@@ -140,13 +135,12 @@ def classify_image_category(pil_img, max_retries=3) -> ImageCategory:
         response_schema=ImageRouter,
     )
 
-    # Запускаем цикл попыток
     for attempt in range(max_retries):
         try:
             print(f"🔍 LLM-роутер: классифицирую изображение (попытка {attempt + 1}/{max_retries})...")
             response = client.models.generate_content(
                 model="gemini-3.5-flash-lite",
-                contents=[pil_img, "Определи категорию изображения."],
+                contents=[router_img, "Определи категорию изображения."], # Передаем сжатую копию
                 config=config
             )
 
@@ -188,49 +182,39 @@ def slice_image_smart_opencv(pil_img):
     return crops if crops else [pil_img]
 
 
-def describe_image(pil_img, previous_table_title=None, previous_row_state=None):
+def describe_image(pil_img, previous_table_title=None, previous_row_state=None, max_retries=3):
     if pil_img is None:
         return "", None, {}
 
     def enhance_for_ocr(img):
-        # 1. Повышаем контрастность (делаем блеклые серые буквы жестко черными)
         enhancer = ImageEnhance.Contrast(img)
-        img = enhancer.enhance(1.8)  # Сильный контраст
-
-        # 2. Убираем "мыло" от растягивания (добавляем программную резкость)
+        img = enhancer.enhance(1.8)
         img = img.filter(ImageFilter.SHARPEN)
         return img
 
-    # Применяем фильтр к картинке, которая уже пришла увеличенной от parser.py
     pil_img = enhance_for_ocr(pil_img)
-
     client = genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
 
-    # [НОВЫЕ СТРОЧКИ]: Определяем категорию ОДНИМ запросом
     category = classify_image_category(pil_img)
     print(f"🎯 Роутер определил категорию: {category.value}")
 
-    # [НОВЫЕ СТРОЧКИ]: Автоматически решаем, нужен ли OpenCV
-    # Плотные таблицы (SCORE2) и обычные текстовые таблицы режем; схемы и анатомию — передаем целиком
     use_opencv = category in ImageCategory.MATRIX
-
     specialized_prompt = PROMPTS_MAP.get(category, PROMPT_TEXT_TABLE)
 
-    # === ДОБАВЬТЕ ВОТ ЭТИ ДВЕ СТРОКИ ===
-    print(f"📝 АКТИВНЫЙ ПРОМПТ: Выбран {category.value}")
-    print(f"Текст промпта (первые 200 символов): {specialized_prompt[:200]}...")
-    # ===================================
-
     continuation_prompt = ""
-
     if previous_table_title:
-        continuation_prompt += f"\nВНИМАНИЕ: Это изображение может быть продолжением таблицы '{previous_table_title}'."
+        continuation_prompt += f"\nВНИМАНИЕ: Это изображение — продолжение таблицы '{previous_table_title}' с предыдущей страницы."
 
     if previous_row_state and isinstance(previous_row_state, dict) and len(previous_row_state) > 0:
+        # Извлекаем названия колонок из ключей словаря прошлой строки
+        headers_list = list(previous_row_state.keys())
         state_json_str = json.dumps(previous_row_state, ensure_ascii=False)
+
         continuation_prompt += (
-            f"\nКРИТИЧЕСКОЕ ПРАВИЛО ПЕРЕНОСА: Вот окончание прошлой страницы: {state_json_str}. "
-            f"Бесшовно объедини данные, если ячейки на этой странице являются продолжением."
+            f"\nКРИТИЧЕСКОЕ ПРАВИЛО ПЕРЕНОСА (РАЗРЫВ ТАБЛИЦЫ):\n"
+            f"1. ШАПКА ТАБЛИЦЫ: На этой картинке нет заглавных столбцов. Ты ОБЯЗАН использовать следующие названия столбцов из прошлой страницы: {headers_list}.\n"
+            f"2. СТРОГАЯ ПРИВЯЗКА: Мысленно наложи эти столбцы слева направо на текущую картинку и формируй условия (context) строго по ним.\n"
+            f"3. СКЛЕЙКА СТРОК: Вот последняя строка прошлой страницы: {state_json_str}. Если первая строка на этой картинке оборвана и выглядит как логическое завершение прошлой — объедини их."
         )
 
     sys_instr = (
@@ -247,7 +231,6 @@ def describe_image(pil_img, previous_table_title=None, previous_row_state=None):
     )
 
     user_content = []
-
     if use_opencv:
         print("✂️ Включаем OpenCV-нарезку для табличного контента.")
         image_slices = slice_image_smart_opencv(pil_img)
@@ -269,78 +252,78 @@ def describe_image(pil_img, previous_table_title=None, previous_row_state=None):
         media_resolution=types.MediaResolution.MEDIA_RESOLUTION_HIGH
     )
 
-    # --- [НОВЫЕ СТРОЧКИ]: Динамический выбор модели ---
-    target_model = "gemini-3.5-flash-lite" if category == ImageCategory.TEXT_TABLE else "gemini-3.6-flash"
+    target_model = "gemini-3.5-flash-lite" if category == ImageCategory.TEXT_TABLE else "gemini-3.7-flash"
     print(f"🤖 Для генерации выбрана модель: {target_model}")
-    # --------------------------------------------------
 
-    try:
-        response = client.models.generate_content(
-            model=target_model,  # [ИСПРАВЛЕНО]: Подставляем переменную вместо жесткого текста
-            contents=user_content,
-            config=config
-        )
+    # --- [НОВЫЙ ЦИКЛ RETRY]: Добавили повторные попытки при ошибках 503/429 ---
+    for attempt in range(max_retries):
+        try:
+            response = client.models.generate_content(
+                model=target_model,
+                contents=user_content,
+                config=config
+            )
 
-        # [НОВОЕ]: Логирование токенов роутера
-        # [НОВОЕ]: Логирование токенов анализатора
-        if response.usage_metadata:
-            print(f"📊 [Анализатор] Токены -> Вход: {response.usage_metadata.prompt_token_count} | "
-                  f"Выход: {response.usage_metadata.candidates_token_count} | "
-                  f"Всего: {response.usage_metadata.total_token_count}")
+            if response.usage_metadata:
+                print(f"📊 [Анализатор] Токены -> Вход: {response.usage_metadata.prompt_token_count} | "
+                      f"Выход: {response.usage_metadata.candidates_token_count} | "
+                      f"Всего: {response.usage_metadata.total_token_count}")
 
-        data = json.loads(response.text)
+            data = json.loads(response.text)
 
-        if data.get("analysis_status") == "success" and (data.get("facts") or data.get("diagram_summary")):
-            global_ctx = data.get("global_context", "").strip()
-            source_type = data.get("source_type", "")
+            if data.get("analysis_status") == "success" and (data.get("facts") or data.get("diagram_summary") or data.get("plain_text_blocks")):
+                global_ctx = data.get("global_context", "").strip()
+                source_type = data.get("source_type", "")
 
-            raw_row_list = data.get("last_row_state", [])
-            row_state = {}
-            if isinstance(raw_row_list, list):
-                for cell in raw_row_list:
-                    if isinstance(cell, dict) and "column_name" in cell and "cell_value" in cell:
-                        row_state[cell["column_name"]] = cell["cell_value"]
-
-            non_empty_vals = [str(val).strip() for val in row_state.values() if str(val).strip()]
-            if non_empty_vals and all(val.endswith((".", "!", "?", ";")) for val in non_empty_vals):
+                raw_row_list = data.get("last_row_state", [])
                 row_state = {}
+                if isinstance(raw_row_list, list):
+                    for cell in raw_row_list:
+                        if isinstance(cell, dict) and "column_name" in cell and "cell_value" in cell:
+                            row_state[cell["column_name"]] = cell["cell_value"]
 
-            current_table_title = None
-            if source_type == "таблица":
-                is_continuation = "продолжение" in global_ctx.lower() or len(global_ctx) < 10
-                if is_continuation and previous_table_title:
-                    global_ctx = f"{previous_table_title} (Продолжение)"
-                    current_table_title = previous_table_title
-                else:
-                    current_table_title = global_ctx
+                non_empty_vals = [str(val).strip() for val in row_state.values() if str(val).strip()]
+                if non_empty_vals and all(val.endswith((".", "!", "?", ";")) for val in non_empty_vals):
+                    row_state = {}
 
-            text_blocks = [f"--- Контекст изображения: {global_ctx} ({source_type}) ---"]
+                current_table_title = None
+                if source_type == "таблица":
+                    is_continuation = "продолжение" in global_ctx.lower() or len(global_ctx) < 10
+                    if is_continuation and previous_table_title:
+                        global_ctx = f"{previous_table_title} (Продолжение)"
+                        current_table_title = previous_table_title
+                    else:
+                        current_table_title = global_ctx
 
-            # 1. Сначала выводим сплошные абзацы (без искажений)
-            if data.get("plain_text_blocks"):
-                for block in data["plain_text_blocks"]:
-                    text_blocks.append(block)
-                text_blocks.append("")  # Отступ для красоты
+                text_blocks = [f"--- Контекст изображения: {global_ctx} ({source_type}) ---"]
 
-            # 2. Затем описание схемы (если есть)
-            if data.get("diagram_summary"):
-                text_blocks.append(f"Механизмы и связи (описание схемы): {data['diagram_summary']}\n")
+                if data.get("plain_text_blocks"):
+                    for block in data["plain_text_blocks"]:
+                        text_blocks.append(block)
+                    text_blocks.append("")
 
-            # 3. Затем сами факты из графа/таблицы
-            for fact in data.get("facts", []):
-                text_blocks.append(f"Условия: [{fact['context']}] => Значение: {fact['value']}")
+                if data.get("diagram_summary"):
+                    text_blocks.append(f"Механизмы и связи (описание схемы): {data['diagram_summary']}\n")
 
-            # 4. В конце выводим сноски, как они есть на картинке
-            if data.get("footnotes"):
-                text_blocks.append("")  # Отступ
-                for note in data["footnotes"]:
-                    text_blocks.append(note)  # Убрали принудительный bullet (•)
+                for fact in data.get("facts", []):
+                    text_blocks.append(f"Условия: [{fact['context']}] => Значение: {fact['value']}")
 
-            final_text = "\n".join(text_blocks)
-            return final_text, current_table_title, row_state
-        else:
-            return "", None, {}
+                if data.get("footnotes"):
+                    text_blocks.append("")
+                    for note in data["footnotes"]:
+                        text_blocks.append(note)
 
-    except Exception as e:
-        print(f"❌ Ошибка при обработке картинки: {e}")
-        return "", None, {}
+                final_text = "\n".join(text_blocks)
+                return final_text, current_table_title, row_state
+            else:
+                print(f"⚠️ Ответ модели пустой или status != success (попытка {attempt + 1}/{max_retries})")
+
+        except Exception as e:
+            print(f"⚠️ Ошибка Gemini в экстракторе (попытка {attempt + 1}/{max_retries}): {e}")
+            if attempt < max_retries - 1:
+                print("🔄 Ждем 5 секунд перед повторным запросом...")
+                time.sleep(5)
+            else:
+                print("❌ Все попытки распознавания картинки исчерпаны.")
+
+    return "", None, {}

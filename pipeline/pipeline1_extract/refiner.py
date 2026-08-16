@@ -5,59 +5,61 @@ from dotenv import load_dotenv
 from functools import cache
 from google import genai
 from google.genai import types
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 load_dotenv()
 
-class RefinedText(BaseModel):
-    refined_text: str
 
-class PageMetadata(BaseModel):
-    topic: str
-    tags: str
-
+class RefinedChunkMetadata(BaseModel):
+    topic: str = Field(
+        description="Главная доминирующая тема всей страницы (70-80%+ объема текста: например, образ жизни, диета, целевые показатели). Категорически запрещено брать тему из последнего предложения."
+    )
+    tags: str = Field(
+        description="5-7 ключевых тегов, отражающих доминирующую тему страницы."
+    )
+    refined_text: str = Field(
+        description="Полный обработанный текст чанка со 100% сохранением всех цифр, сносок и структуры."
+    )
 
 @cache
 def get_gemini_client():
     https_proxy = os.getenv('HTTPS_PROXY')
     if https_proxy:
         os.environ['HTTPS_PROXY'] = https_proxy
-
     http_proxy = os.getenv('HTTP_PROXY')
     if http_proxy:
         os.environ['HTTP_PROXY'] = http_proxy
-
     return genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
 
-
-def refine_medical_chunk(chunk_text, max_retries=3):
+# 2. ОБНОВЛЕННАЯ ФУНКЦИЯ: Объединили два промпта в один
+def refine_medical_chunk(chunk_text, previous_topic=None, max_retries=3):
     client = get_gemini_client()
     model_id = "gemini-3.5-flash-lite"
 
-    # [ИСПРАВЛЕНО]: Убрали ручные инструкции по формату JSON
+    # Добавляем контекст из старого генератора метаданных
+    context_hint = ""
+    if previous_topic:
+        context_hint = f"\nДля справки, тема предыдущей страницы была: '{previous_topic}'. Если текущий текст выглядит как продолжение, учти это при формулировании темы."
+
     sys_instr = (
-        "Ты — строгий технический редактор и медицинский аналитик. Твоя задача:\n"
-        "1. ПРЕОБРАЗОВАНИЕ ТАБЛИЦ И СПИСКОВ (СТРАХОВОЧНЫЙ ШАГ): Если парсер захватил таблицу в виде Markdown-текста (|---|), "
-        "перепиши её в связные предложения естественным языком. "
-        "КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО использовать символы математических стрелок ('->', '=>'). "
-        "Если перед тобой медицинский перечень или список симптомов, преобразуй каждый пункт в текстовый формат: "
-        "'Условие: [...]. Значение: [...]', чтобы текст не был сплошным неструктурированным полотном.\n"
-        "2. СОХРАНЕНИЕ СТРУКТУРЫ: Строго сохраняй вложенность списков и ВСЕ Markdown-заголовки (#, ##, ###). "
-        "Не изменяй уровень заголовков.\n"
-        "3. ФОРМАТИРОВАНИЕ ТЕКСТА: Используй \\n\\n только для разделения абзацев. Внутри одного "
-        "предложения или одного логического пункта списка НЕ ДОЛЖНО БЫТЬ никаких переносов строк (\\n).\n"
-        "4. ПРАВИЛО ПОЛНОТЫ И СНОСОК (КРИТИЧНО): Работай в режиме СЛЕПОГО транскрибатора. "
-        "КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО удалять цифры или надстрочные знаки (¹, ², ³, ⁴, ⁵, 1, 2, 3, 4, 5 и т.д.). "
-        "КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО заменять цифры словами (например, писать 'два' вместо '2'). "
-        "Это маркеры сносок, они жизненно необходимы для связи данных. Переноси абсолютно весь текст на 100% до единого символа.\n"
-        "5. АББРЕВИАТУРЫ: Если в тексте встречаются аббревиатуры и их расшифровки в скобках (например, 'АГ (артериальная гипертензия)'), КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО удалять или изменять их. Оставляй текст в исходном виде."
+        "Ты — строгий технический редактор и клинический дата-сайентист.\n\n"
+        "1. ТРАНСКРИБАЦИЯ: Переноси абсолютно весь текст на 100% со всеми цифрами, сносками и единицами измерения.\n"
+        "2. ТАБЛИЦЫ: Переписывай Markdown-таблицы в связный текст без математических стрелок ('->', '=>').\n"
+        "3. СТРУКТУРА: Сохраняй абзацы (\\n\\n) и Markdown-заголовки (#, ##).\n"
+        "4. АББРЕВИАТУРЫ: Не изменяй и не удаляй медицинские сокращения.\n\n"
+        "5. ПРАВИЛО ВЫБОРА ТЕМЫ (TOPIC) И ТЕГОВ (TAGS) — КРИТИЧНО:\n"
+        "   - Если в тексте встречается заголовок или выделенная фраза раздела (например, 'Советы пациенту и его семье', 'Диагностика...', 'Лечение...'), ты ОБЯЗАН взять тему из этого заголовка.\n"
+        "   - Если явного заголовка нет, формулируй тему по ПЕРВОЙ ПОЛОВИНЕ текста (первые 2-3 абзаца).\n"
+        "   - СТРОЖАЙШЕ ЗАПРЕЩЕНО брать тему из последнего предложения или изолированных сносок внизу страницы.\n"
+        "   - В 'tags' перечисли термины, описывающие основное полотно текста (образ жизни, диета, соль, физическая активность, целевые уровни)."
+        f"{context_hint}"
     )
 
     config = types.GenerateContentConfig(
         system_instruction=sys_instr,
-        temperature=0,
+        temperature=0.1,  # Немного подняли для лучшей генерации тегов
         response_mime_type="application/json",
-        response_schema=RefinedText,  # Принудительная структура
+        response_schema=RefinedChunkMetadata,
     )
 
     for attempt in range(max_retries):
@@ -68,7 +70,6 @@ def refine_medical_chunk(chunk_text, max_retries=3):
                 config=config
             )
             return json.loads(response.text)
-
         except Exception as e:
             print(f"⚠️ Ошибка Gemini (попытка {attempt + 1}/{max_retries}): {e}")
             time.sleep(5)
@@ -76,42 +77,4 @@ def refine_medical_chunk(chunk_text, max_retries=3):
     print("❌ Не удалось обработать текст после всех попыток.")
     return None
 
-
-def generate_page_metadata(page_text, previous_topic=None, max_retries=3):
-    client = get_gemini_client()
-    model_id = "gemini-3.5-flash-lite"
-
-    context_hint = ""
-    if previous_topic:
-        context_hint = f"\nДля справки, тема предыдущей страницы была: '{previous_topic}'. Если текущий текст выглядит как продолжение (например, обрывок таблицы), учти это при формулировании новой темы и укажи, что это продолжение."
-
-    sys_instr = (
-        "Ты — клинический дата-сайентист. Твоя задача — проанализировать извлеченный текст страницы медицинской книги "
-        "и выделить ее главный смысловой контекст для поисковой системы.\n"
-        "1. Сформулируй главную тему страницы предельно кратко, емко и структурировано (как заголовок статьи или справочника). "
-        "КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО использовать вводные слова, полные предложения. Пиши только саму суть.\n"
-        "2. Выдели 5-7 ключевых медицинских тегов (симптомы, диагнозы, показатели, препараты), которые встречаются в тексте.\n"
-        f"{context_hint}\n"
-    )
-
-    config = types.GenerateContentConfig(
-        system_instruction=sys_instr,
-        temperature=0.1,
-        response_mime_type="application/json",
-        response_schema=PageMetadata,  # Строгое ограничение
-    )
-
-    for attempt in range(max_retries):
-        try:
-            response = client.models.generate_content(
-                model=model_id,
-                contents=f"Текст страницы:\n\n{page_text}",
-                config=config
-            )
-            return json.loads(response.text)
-
-        except Exception as e:
-            print(f"⚠️ Ошибка генерации метаданных (попытка {attempt + 1}/{max_retries}): {e}")
-            time.sleep(3)
-
-    return {"topic": "Медицинские данные", "tags": "медицина, справочник"}
+# ФУНКЦИЮ generate_page_metadata УДАЛЯЕМ ПОЛНОСТЬЮ!

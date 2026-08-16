@@ -9,33 +9,43 @@ from docling.datamodel.pipeline_options import PdfPipelineOptions
 
 def detect_table_zones_by_lines(page, min_line_length=150):
     """
-    [НОВОЕ]: Геометрический поиск таблиц по нарисованным линиям в PDF.
-    Если на странице есть горизонтальные или вертикальные линии сетки (как на стр. 187),
-    функция возвращает их Y-интервалы, даже если Docling их не распознал.
+    Геометрический поиск таблиц по линиям в PDF.
+    Группирует близкие линии в отдельные кластеры, разделяя независимые таблицы.
     """
     drawings = page.get_drawings()
     table_y_coords = []
 
     for draw in drawings:
         rect = draw["rect"]
-        # Ищем горизонтальные линии таблицы (ширина > min_line_length, высота тонкая)
+        # Горизонтальные линии таблицы
         if rect.width > min_line_length and rect.height < 5:
             table_y_coords.append((rect.y0, rect.y1))
-        # Ищем длинные вертикальные границы колонок
+        # Вертикальные границы колонок
         elif rect.height > 50 and rect.width < 5:
             table_y_coords.append((rect.y0, rect.y1))
 
     if not table_y_coords:
         return []
 
-    # Находим общие границы графической сетки на странице
-    y_min = min(y[0] for y in table_y_coords)
-    y_max = max(y[1] for y in table_y_coords)
+    # Сортируем все координаты линий сверху вниз
+    table_y_coords.sort(key=lambda x: x[0])
 
-    # Если линии занимают существенную высоту (>50 пикселей), считаем это зоной таблицы
-    if (y_max - y_min) > 50:
-        return [[y_min, y_max]]
-    return []
+    # Кластеризуем линии: если расстояние между линиями > 35px, это РАЗНЫЕ таблицы
+    clusters = []
+    current_cluster = [table_y_coords[0][0], table_y_coords[0][1]]
+
+    for y0, y1 in table_y_coords[1:]:
+        if y0 <= current_cluster[1] + 35:
+            current_cluster[1] = max(current_cluster[1], y1)
+        else:
+            if (current_cluster[1] - current_cluster[0]) > 40:
+                clusters.append(current_cluster)
+            current_cluster = [y0, y1]
+
+    if (current_cluster[1] - current_cluster[0]) > 40:
+        clusters.append(current_cluster)
+
+    return clusters
 
 
 def parse_pdf_pro(pdf_path, start_page=1, end_page=1):

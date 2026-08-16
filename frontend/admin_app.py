@@ -239,19 +239,22 @@ with tab_upload:
         else:
             current = st.session_state.current_parsing_page
 
-            # Прогресс-бар и статус
-            progress = (current - start_page) / (end_page - start_page + 1) if end_page >= start_page else 1.0
-            st.progress(progress, text=f"⏳ Идет обработка страницы {current} из {end_page}...")
+            # --- [ИСПРАВЛЕНИЕ 1]: Создаем пустые контейнеры для виджетов ---
+            progress_placeholder = st.empty()
+            stop_btn_placeholder = st.empty()
 
-            # Кнопка СТОП
-            if st.button("🛑 Остановить парсинг", type="primary", use_container_width=True):
+            # Рисуем прогресс-бар ВНУТРИ контейнера
+            progress = (current - start_page) / (end_page - start_page + 1) if end_page >= start_page else 1.0
+            progress_placeholder.progress(progress, text=f"⏳ Идет обработка страницы {current} из {end_page}...")
+
+            # Рисуем кнопку СТОП ВНУТРИ контейнера
+            if stop_btn_placeholder.button("🛑 Остановить парсинг", type="primary", use_container_width=True):
                 st.session_state.current_parsing_page = None
                 st.error("Парсинг был принудительно остановлен пользователем.")
                 st.rerun()
 
             st.markdown("### 🖥️ Живой лог обработки:")
             log_container = st.empty()
-
 
             # Класс для перехвата print()
             class StreamlitConsole:
@@ -267,7 +270,6 @@ with tab_upload:
 
                 def flush(self):
                     pass
-
 
             old_stdout = sys.stdout
             sys.stdout = StreamlitConsole(log_container)
@@ -292,11 +294,17 @@ with tab_upload:
             finally:
                 sys.stdout = old_stdout
 
+            # Переход к следующей странице или успешное завершение
             if current < end_page:
                 st.session_state.current_parsing_page += 1
                 st.rerun()
             else:
                 st.session_state.current_parsing_page = None
+
+                # --- [ИСПРАВЛЕНИЕ 2]: Удаляем прогресс-бар и кнопку СТОП с экрана ---
+                progress_placeholder.empty()
+                stop_btn_placeholder.empty()
+
                 st.success(f"✅ Парсинг успешно завершен! Результаты в папке {book_name}")
                 if st.button("Ок, скрыть логи"):
                     st.rerun()
