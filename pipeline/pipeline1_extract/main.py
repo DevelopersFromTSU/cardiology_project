@@ -3,7 +3,6 @@ import os
 import json
 from pipeline.pipeline1_extract.parser import parse_pdf_pro
 from pipeline.pipeline1_extract.vision import describe_image
-from pipeline.utils.abbreviations import force_expand_abbreviations
 from pipeline.pipeline1_extract.refiner import refine_medical_chunk, extract_page_metadata
 
 
@@ -50,14 +49,15 @@ def run_pipeline(book_path, output_folder, start_page, end_page):
         # 2. Обработка блоков страницы
         for item in grouped_elements:
             if item["type"] == "text":
-                text_expanded = force_expand_abbreviations(item["content"])
+                raw_text = item["content"]
 
-                table_match = re.search(r'(Таблица\s+[\w\.\-/]+[^\n]+)', text_expanded, re.IGNORECASE)
+                table_match = re.search(r'(Таблица\s+[\w.\-/]+[^\n]+)', raw_text, re.IGNORECASE)
                 if table_match:
                     last_table_title = table_match.group(1).strip()
                     last_row_state = {}
 
-                refined_text = refine_medical_chunk(text_expanded)
+                # Передаем оригинальный текст напрямую в LLM-рефайнер
+                refined_text = refine_medical_chunk(raw_text)
                 if refined_text:
                     page_final_blocks.append(refined_text)
 
@@ -78,15 +78,15 @@ def run_pipeline(book_path, output_folder, start_page, end_page):
                 if extracted_state and isinstance(extracted_state, dict):
                     last_row_state = extracted_state
 
+                # Описание изображения добавляется напрямую без слепой Regex-обработки
                 if vision_description.strip():
-                    expanded_vision_text = force_expand_abbreviations(vision_description)
-                    page_final_blocks.append(expanded_vision_text)
+                    page_final_blocks.append(vision_description)
 
         combined_page_text = "\n\n".join(page_final_blocks).strip()
         if not combined_page_text:
             continue
 
-        # 3. ЕДИНАЯ ГЕНЕРАЦИЯ ТОПИКА И ТЕГОВ ПО ВСЕМУ ТЕКСТУ СТРАНИЦЫ
+        # 3. Единая генерация топика и тегов по всему тексту страницы
         page_topic = "Не определена"
         page_tags = "Нет тегов"
 
@@ -95,7 +95,6 @@ def run_pipeline(book_path, output_folder, start_page, end_page):
             page_topic = metadata.get("topic", "Не определена")
             page_tags = metadata.get("tags", "Нет тегов")
         else:
-            # Fallback по заголовку изображения или таблицы
             ctx_match = re.search(r'---\s*Контекст изображения:\s*(.*?)\s*---', combined_page_text)
             if ctx_match:
                 clean_title = re.sub(r'\s*\([a-zA-Z_]+\)$', '', ctx_match.group(1).strip())

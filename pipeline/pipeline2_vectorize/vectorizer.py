@@ -45,50 +45,50 @@ def merge_short_pages(page_files_data, min_chars=250):
     return merged_data
 
 
-# -----------------------------------------------------
+def get_global_chunks_with_pages(page_files_data, book_name, chunk_size=1500, chunk_overlap=200):
+    # Учитываем всю иерархию заголовков, которую создает наш refiner.py
+    headers_to_split_on = [("#", "H1"), ("##", "H2"), ("###", "H3")]
+    markdown_splitter = MarkdownHeaderTextSplitter(headers_to_split_on=headers_to_split_on)
 
+    text_splitter = RecursiveCharacterTextSplitter(
+        chunk_size=chunk_size,
+        chunk_overlap=chunk_overlap,
+        length_function=len
+    )
 
-def get_global_chunks_with_pages(page_files_data, chunk_size=4000, chunk_overlap=400):
-    full_text = ""
-    page_boundaries = []
+    final_chunks = []
 
+    # Обрабатываем каждую страницу строго изолированно
     for page_num, raw_text, topic, tags in page_files_data:
         cleaned = clean_excessive_whitespace(raw_text)
         if not cleaned:
             continue
 
-        enriched_text = f"--- ТЕМА СТРАНИЦЫ: {topic} ---\n--- ТЕГИ: {tags} ---\nДАННЫЕ:\n{cleaned}"
+        # 1. Сначала бьем страницу по Markdown-заголовкам
+        md_splits = markdown_splitter.split_text(cleaned)
 
-        start_idx = len(full_text)
-        full_text += enriched_text + "\n\n"
-        end_idx = len(full_text)
-        page_boundaries.append((start_idx, end_idx, page_num))
+        # 2. Затем аккуратно режем слишком длинные куски
+        doc_splits = text_splitter.split_documents(md_splits)
 
-    headers_to_split_on = [("#", "Header 1")]
-    markdown_splitter = MarkdownHeaderTextSplitter(headers_to_split_on=headers_to_split_on)
-    md_splits = markdown_splitter.split_text(full_text)
+        for doc in doc_splits:
+            # 3. Добавляем метаданные в объект документа
+            doc.metadata.update({
+                "page": page_num,
+                "topic": topic,
+                "tags": tags,
+                "book": book_name
+            })
 
-    text_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=chunk_size,
-        chunk_overlap=chunk_overlap,
-        length_function=len,
-        add_start_index=True
-    )
-    final_chunks = text_splitter.split_documents(md_splits)
+            # 4. Вшиваем жесткий контекст прямо в начало текста чанка для эмбеддера
+            header_context = " > ".join([v for k, v in doc.metadata.items() if k.startswith("H")])
+            context_prefix = f"Трактат: {book_name} | Тема: {topic} | Теги: {tags}\n"
+            if header_context:
+                context_prefix += f"Раздел: {header_context}\n"
 
-    chunks_with_metadata = []
-    for chunk in final_chunks:
-        start_char = chunk.metadata.get("start_index", 0)
-        assigned_page = page_boundaries[0][2] if page_boundaries else 1
-        for p_start, p_end, p_num in page_boundaries:
-            if p_start <= start_char < p_end:
-                assigned_page = p_num
-                break
+            doc.page_content = f"{context_prefix}\n{doc.page_content}"
+            final_chunks.append(doc)
 
-        chunk.metadata["page"] = assigned_page
-        chunks_with_metadata.append(chunk)
-
-    return chunks_with_metadata
+    return final_chunks
 
 
 def upload_chunks_to_qdrant(chunks, qdrant_client, embedding_model, collection_name, book_name):
@@ -97,6 +97,8 @@ def upload_chunks_to_qdrant(chunks, qdrant_client, embedding_model, collection_n
     for i, chunk in enumerate(chunks, 1):
         chunk_text = chunk.page_content
         page_num = chunk.metadata.get("page", 0)
+        topic = chunk.metadata.get("topic", "")
+        tags = chunk.metadata.get("tags", "")
 
         outputs = embedding_model.encode([chunk_text], return_dense=True, return_sparse=True)
         dense_vec = outputs['dense_vecs'][0].tolist()
@@ -108,15 +110,20 @@ def upload_chunks_to_qdrant(chunks, qdrant_client, embedding_model, collection_n
 
         stable_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"{collection_name}_{book_name}_chunk_{i}"))
 
+        # Добавили topic и tags в payload для мета-фильтрации
         point = models.PointStruct(
             id=stable_id,
             vector={"dense": dense_vec, "sparse": sparse_vec},
-            payload={"text": chunk_text, "page": page_num, "book": book_name}
+            payload={
+                "text": chunk_text,
+                "page": page_num,
+                "book": book_name,
+                "topic": topic,
+                "tags": tags
+            }
         )
         qdrant_client.upsert(collection_name=collection_name, points=[point])
         print(f"✅ Загружен чанк {i}/{len(chunks)} (Страница {page_num})")
-
-
 if __name__ == "__main__":
     load_dotenv()
 
@@ -167,6 +174,6 @@ if __name__ == "__main__":
         page_files_data = merge_short_pages(raw_page_data, min_chars=250)
 
         # 3. Режем на чанки и векторизуем
-        all_chunks = get_global_chunks_with_pages(page_files_data)
+        all_chunks = get_global_chunks_with_pages(page_files_data, args.book)
         upload_chunks_to_qdrant(all_chunks, qdrant, model, collection_name, args.book)
         print("🎉 Векторизация и загрузка успешно завершены!")

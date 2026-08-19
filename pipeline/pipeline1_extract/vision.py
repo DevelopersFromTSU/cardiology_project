@@ -93,18 +93,14 @@ class RowStateCell(BaseModel):
 
 class ImageExtraction(BaseModel):
     analysis_status: str = Field(description="Статус: 'success' или 'failed'")
-    # reasoning_step: str = Field(description="Внутренний монолог...")
     diagram_summary: str = Field(default="", description="Описание схем и графиков.")
     source_type: str = Field(description="Тип контента")
     global_context: str = Field(description="Общее название изображения")
     last_row_state: list[RowStateCell] = Field(default=[])
-    # --- НОВЫЕ СТРОЧКИ ---
     plain_text_blocks: list[str] = Field(
         default=[],
         description="Сплошные абзацы текста (например, введения или выводы), не являющиеся схемой. Копировать СЛОВО В СЛОВО."
     )
-    # --------------------
-
     facts: list[ExtractedFact] = Field(
         description="Массив извлеченных данных ТОЛЬКО из таблиц и блок-схем: строго логические связи."
     )
@@ -115,13 +111,11 @@ class ImageExtraction(BaseModel):
 
 
 def classify_image_category(pil_img, max_retries=3) -> ImageCategory:
+    """Классификатор типа изображения с легкой моделью."""
     client = genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
 
-    # --- НОВЫЕ СТРОЧКИ НАЧАЛО ---
-    # Создаем сильно сжатую копию специально для роутера
     router_img = pil_img.copy()
-    router_img.thumbnail((512, 512)) # Агрессивное сжатие силуэта
-    # --- НОВЫЕ СТРОЧКИ КОНЕЦ ---
+    router_img.thumbnail((512, 512))
 
     sys_instr = (
         "Ты — эксперт-классификатор медицинских документов. Твоя единственная задача — посмотреть "
@@ -140,11 +134,10 @@ def classify_image_category(pil_img, max_retries=3) -> ImageCategory:
             print(f"🔍 LLM-роутер: классифицирую изображение (попытка {attempt + 1}/{max_retries})...")
             response = client.models.generate_content(
                 model="gemini-3.5-flash-lite",
-                contents=[router_img, "Определи категорию изображения."], # Передаем сжатую копию
+                contents=[router_img, "Определи категорию изображения."],
                 config=config
             )
 
-            # Логирование токенов роутера
             if response.usage_metadata:
                 print(f"📊 [Роутер] Токены -> Вход: {response.usage_metadata.prompt_token_count} | "
                       f"Выход: {response.usage_metadata.candidates_token_count} | "
@@ -157,10 +150,11 @@ def classify_image_category(pil_img, max_retries=3) -> ImageCategory:
             print(f"⚠️ Ошибка роутера (попытка {attempt + 1}/{max_retries}): {e}")
             if attempt < max_retries - 1:
                 print("🔄 Ждем 5 секунд и повторяем запрос к API...")
-                time.sleep(5)  # Пауза перед следующей попыткой
+                time.sleep(5)
             else:
                 print("❌ Все попытки исчерпаны. Откат на класс по умолчанию (text_table).")
                 return ImageCategory.TEXT_TABLE
+
 
 def slice_image_smart_opencv(pil_img):
     open_cv_image = np.array(pil_img)
@@ -182,7 +176,7 @@ def slice_image_smart_opencv(pil_img):
     return crops if crops else [pil_img]
 
 
-def describe_image(pil_img, previous_table_title=None, previous_row_state=None, max_retries=3):
+def describe_image(pil_img, previous_table_title=None, previous_row_state=None, max_retries=10):
     if pil_img is None:
         return "", None, {}
 
@@ -206,7 +200,6 @@ def describe_image(pil_img, previous_table_title=None, previous_row_state=None, 
         continuation_prompt += f"\nВНИМАНИЕ: Это изображение — продолжение таблицы '{previous_table_title}' с предыдущей страницы."
 
     if previous_row_state and isinstance(previous_row_state, dict) and len(previous_row_state) > 0:
-        # Извлекаем названия колонок из ключей словаря прошлой строки
         headers_list = list(previous_row_state.keys())
         state_json_str = json.dumps(previous_row_state, ensure_ascii=False)
 
@@ -252,14 +245,18 @@ def describe_image(pil_img, previous_table_title=None, previous_row_state=None, 
         media_resolution=types.MediaResolution.MEDIA_RESOLUTION_HIGH
     )
 
-    target_model = "gemini-3.5-flash-lite" if category == ImageCategory.TEXT_TABLE else "gemini-3.7-flash"
-    print(f"🤖 Для генерации выбрана модель: {target_model}")
+    # Базовая модель по умолчанию в зависимости от категории изображения
+    base_model = "gemini-3.5-flash-lite" if category == ImageCategory.TEXT_TABLE else "gemini-3.7-flash"
 
-    # --- [НОВЫЙ ЦИКЛ RETRY]: Добавили повторные попытки при ошибках 503/429 ---
     for attempt in range(max_retries):
         try:
+            # Если легкая модель вернула пустой результат или упала с 1-й попытки — эскалируем на gemini-3.7-flash
+            current_model = "gemini-3.7-flash" if attempt > 0 else base_model
+            if attempt > 0 and current_model != base_model:
+                print(f"⚡ Эскалация: переключаем попытку {attempt + 1} на тяжелую модель {current_model}...")
+
             response = client.models.generate_content(
-                model=target_model,
+                model=current_model,
                 contents=user_content,
                 config=config
             )
@@ -287,7 +284,6 @@ def describe_image(pil_img, previous_table_title=None, previous_row_state=None, 
                     row_state = {}
 
                 current_table_title = None
-                # Исправление 2: регистронезависимая проверка типов на русском и английском
                 if source_type.lower() in ["таблица", "table", "matrix", "text_table"]:
                     is_continuation = "продолжение" in global_ctx.lower() or len(global_ctx) < 10
                     if is_continuation and previous_table_title:

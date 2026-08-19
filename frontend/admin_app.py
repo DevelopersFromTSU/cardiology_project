@@ -5,6 +5,9 @@ import re
 import subprocess
 import sys
 from pathlib import Path
+import fitz
+import io
+from PIL import Image
 
 # 1. Настройка путей относительно проекта
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -19,9 +22,41 @@ st.set_page_config(page_title="CardiologyV2 Admin", layout="wide")
 st.title("🫀 CardiologyV2: Панель управления RAG-данными")
 
 
-def extract_page_number(filename):
+def extract_page_number(filename: str) -> int:
     match = re.search(r'page_(\d+)\.json', filename)
     return int(match.group(1)) if match else 0
+
+
+# --- Пользовательский лог-консоль с защитой от байтов и накопления буфера ---
+class StreamlitConsole:
+    def __init__(self, placeholder):
+        self.placeholder = placeholder
+        self.buffer = []
+
+    def write(self, text):
+        # 1. Безопасное декодирование бинарных данных при сигналах прерывания (Ctrl+C / click.secho)
+        if isinstance(text, bytes):
+            text = text.decode("utf-8", errors="replace")
+        elif not isinstance(text, str):
+            text = str(text)
+
+        clean_text = text.strip()
+        if clean_text:
+            self.buffer.append(clean_text)
+            # Ограничиваем буфер последними 30 строками для экономии памяти UI
+            if len(self.buffer) > 30:
+                self.buffer.pop(0)
+
+            # Безопасная склейка только строковых элементов
+            display_text = "\n".join(str(item) for item in self.buffer)
+            self.placeholder.code(display_text, language="bash")
+
+    def flush(self):
+        pass
+
+    def clear(self):
+        self.buffer = []
+        self.placeholder.empty()
 
 
 # --- Пользовательские стили ---
@@ -99,7 +134,7 @@ with tab_edit:
             with nav_col1:
                 st.write("")
                 st.write("")
-                if st.button("⬅️ Предыдущая", use_container_width=True):
+                if st.button("⬅️ Предыдущая", width="stretch"):
                     if st.session_state.current_page_index > 0:
                         st.session_state.current_page_index -= 1
                         st.rerun()
@@ -115,7 +150,7 @@ with tab_edit:
             with nav_col3:
                 st.write("")
                 st.write("")
-                if st.button("Следующая ➡️", type="primary", use_container_width=True):
+                if st.button("Следующая ➡️", type="primary", width="stretch"):
                     if st.session_state.current_page_index < len(json_files) - 1:
                         st.session_state.current_page_index += 1
                         st.rerun()
@@ -163,7 +198,7 @@ with tab_edit:
                             )
                             submit_button = st.form_submit_button(
                                 "💾 Сохранить изменения в JSON",
-                                use_container_width=True
+                                width="stretch"
                             )
 
                             if submit_button:
@@ -188,16 +223,12 @@ with tab_edit:
                     page_num = extract_page_number(selected_file)
 
                     if pdf_path.exists() and page_num > 0:
-                        import fitz
-                        import io
-                        from PIL import Image
-
                         try:
                             doc = fitz.open(pdf_path)
                             page = doc[page_num - 1]
                             pix = page.get_pixmap(matrix=fitz.Matrix(2.0, 2.0))
                             img = Image.open(io.BytesIO(pix.tobytes("png")))
-                            st.image(img, use_container_width=True)
+                            st.image(img, width="stretch")
                             doc.close()
                         except Exception as e:
                             st.error(f"Не удалось загрузить превью PDF: {e}")
@@ -232,7 +263,7 @@ with tab_upload:
             st.session_state.current_parsing_page = None
 
         if st.session_state.current_parsing_page is None:
-            if st.button("▶️ Запустить парсинг (main.py)", use_container_width=True):
+            if st.button("▶️ Запустить парсинг (main.py)", width="stretch"):
                 st.session_state.current_parsing_page = start_page
                 st.rerun()
         else:
@@ -244,7 +275,7 @@ with tab_upload:
             progress = (current - start_page) / (end_page - start_page + 1) if end_page >= start_page else 1.0
             progress_placeholder.progress(progress, text=f"⏳ Идет обработка страницы {current} из {end_page}...")
 
-            if stop_btn_placeholder.button("🛑 Остановить парсинг", type="primary", use_container_width=True):
+            if stop_btn_placeholder.button("🛑 Остановить парсинг", type="primary", width="stretch"):
                 st.session_state.current_parsing_page = None
                 st.error("Парсинг был принудительно остановлен пользователем.")
                 st.rerun()
@@ -252,22 +283,10 @@ with tab_upload:
             st.markdown("### 🖥️ Живой лог обработки:")
             log_container = st.empty()
 
-            class StreamlitConsole:
-                def __init__(self, placeholder):
-                    self.placeholder = placeholder
-                    self.buffer = []
-
-                def write(self, text):
-                    if text.strip():
-                        self.buffer.append(text.strip())
-                        display_text = "\n".join(self.buffer[-20:])
-                        self.placeholder.code(display_text, language="bash")
-
-                def flush(self):
-                    pass
-
+            # Инициализируем консоль логов
+            console = StreamlitConsole(log_container)
             old_stdout = sys.stdout
-            sys.stdout = StreamlitConsole(log_container)
+            sys.stdout = console
 
             try:
                 if str(BASE_DIR) not in sys.path:
@@ -297,7 +316,7 @@ with tab_upload:
                 progress_placeholder.empty()
                 stop_btn_placeholder.empty()
                 st.success(f"✅ Парсинг успешно завершен! Результаты в папке {book_name}")
-                if st.button("Ок, скрыть логи"):
+                if st.button("Ок, скрыть логи", width="stretch"):
                     st.rerun()
 
     else:
@@ -312,7 +331,7 @@ with tab_export:
     if books_for_export:
         selected_export_book = st.selectbox("📚 Выберите книгу для векторизации", books_for_export)
 
-        if st.button("🚀 Запустить vectorizer.py для выбранной книги"):
+        if st.button("🚀 Запустить vectorizer.py для выбранной книги", width="stretch"):
             with st.spinner(f"Создание эмбеддингов для '{selected_export_book}' и отправка в БД..."):
                 vectorizer_script = PIPELINE_DIR / "pipeline2_vectorize" / "vectorizer.py"
                 result = subprocess.run(
