@@ -4,13 +4,20 @@ import json
 import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 import fitz
 import io
 from PIL import Image
+from dotenv import load_dotenv
 
-# 1. Настройка путей относительно проекта
+load_dotenv()
+
 BASE_DIR = Path(__file__).resolve().parent.parent
+
+if str(BASE_DIR) not in sys.path:
+    sys.path.append(str(BASE_DIR))
+
 PIPELINE_DIR = BASE_DIR / "pipeline"
 RESULT_DIR = PIPELINE_DIR / "result"
 DATA_DIR = PIPELINE_DIR / "data"
@@ -27,14 +34,92 @@ def extract_page_number(filename: str) -> int:
     return int(match.group(1)) if match else 0
 
 
-# --- Пользовательский лог-консоль с защитой от байтов и накопления буфера ---
+def run_smart_reparse(book_path_pdf, book_name_str, page_number, use_prev, use_next, use_draft, current_draft, custom_prompt):
+    from pipeline.pipeline1_extract.parser import parse_pdf_pro
+    from google import genai
+    from google.genai import types
+
+    context_text = ""
+    if use_prev and page_number > 1:
+        prev_file = RESULT_DIR / book_name_str / f"page_{page_number-1}.json"
+        if prev_file.exists():
+            with open(prev_file, "r", encoding="utf-8") as f:
+                context_text += f"--- ЭТАЛОННАЯ ШАПКА И КОНТЕКСТ С ПРЕДЫДУЩЕЙ СТРАНИЦЫ (СТР. {page_number-1}) ---\n{json.load(f).get('refined_text', '')}\n\n"
+
+    if use_next:
+        next_file = RESULT_DIR / book_name_str / f"page_{page_number+1}.json"
+        if next_file.exists():
+            with open(next_file, "r", encoding="utf-8") as f:
+                context_text += f"--- КОНТЕКСТ СЛЕДУЮЩЕЙ СТРАНИЦЫ (СТР. {page_number+1}) ---\n{json.load(f).get('refined_text', '')}\n\n"
+
+    elements = parse_pdf_pro(str(book_path_pdf), page_number, page_number)
+
+    # Системная инструкция строгого точечного патчинга
+    sys_instr = (
+        "Ты — высокоточный медицинский редактор и дата-инженер.\n"
+        "ТВОЯ ЗАДАЧА: Выполнить точечную замену ТОЛЬКО поврежденных строк таблицы в черновике, оставив весь остальной текст страницы в исходном виде.\n\n"
+        "ПРАВИЛА ИЗМЕНЕНИЙ:\n"
+        "1. НЕПРИКОСНОВЕННОСТЬ БАЗОВОГО ТЕКСТА (СТРОГО):\n"
+        "   - Весь текст черновика, НЕ являющийся строками сломанной таблицы (заголовки, описания других шкал, клинические пояснения, примечания, сноски), оставь АБСОЛЮТНО НЕИЗМЕННЫМ.\n"
+        "   - Запрещено перефразировать, сокращать, менять формулировки или удалять существующие абзацы.\n\n"
+        "2. ИСПРАВЛЕНИЕ ТОЛЬКО РАЗРЫВА ТАБЛИЦЫ:\n"
+        "   - Найди в черновике строки таблицы с потерянными названиями колонок ('Столбец 2', 'Колонка 1' и т.д.) или оборванными строками.\n"
+        "   - Замени в этих строках абстрактные колонки на точные клинические названия препаратов/параметров из эталонного контекста прошлой страницы.\n"
+        "   - Формат исправленных строк таблицы: 'Условия: [Глубокий 2D-путь] => Значение: [Факты/Показатели]'.\n\n"
+        "3. ЗАПРЕТ НА КОЛОНТИТУЛЫ И ПАГИНАЦИЮ:\n"
+        "   - Категорически запрещено выводить в конце или начале текста физические номера страниц (например, '222', '223'), колонтитулы и служебные типографские маркеры PDF.\n\n"
+        "4. ПРИОРИТЕТ ВРАЧА:\n"
+        "   - Если переданы дополнительные указания врача-эксперта, примени их к исправляемой таблице."
+    )
+
+    user_content = []
+    if context_text:
+        user_content.append(context_text)
+
+    if use_draft and current_draft.strip():
+        draft_instruction = (
+            f"--- ЭТАЛОННЫЙ ЧЕРНОВИК СТРАНИЦЫ ИЗ JSON ---\n{current_draft}\n\n"
+            "⚠️ ИНСТРУКЦИЯ: Сохрани весь этот текст без изменений, исправив ТОЛЬКО поврежденные строки таблицы (замени абстрактные названия столбцов на правильные препараты из прошлой страницы). "
+            "Не добавляй в вывод номер страницы."
+        )
+        user_content.append(draft_instruction)
+
+    for el in elements:
+        user_content.append(el["content"])
+
+    if custom_prompt:
+        user_content.append(f"\n\n--- ДОПОЛНИТЕЛЬНЫЕ УКАЗАНИЯ ВРАЧА-ЭКСПЕРТА ---\n{custom_prompt}")
+
+    client = genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
+    config = types.GenerateContentConfig(
+        system_instruction=sys_instr,
+        temperature=0.0,
+        max_output_tokens=42768,
+        media_resolution=types.MediaResolution.MEDIA_RESOLUTION_HIGH
+    )
+
+    max_retries = 10
+    for attempt in range(max_retries):
+        try:
+            response = client.models.generate_content(
+                model="gemini-3.7-flash",
+                contents=user_content,
+                config=config
+            )
+            return response.text.strip()
+        except Exception as e:
+            print(f"⚠️ Ошибка API при перепарсе (попытка {attempt + 1}/{max_retries}): {e}")
+            if attempt < max_retries - 1:
+                time.sleep(5)
+            else:
+                raise Exception(f"Все {max_retries} попыток исчерпаны. Ошибка: {e}")
+
 class StreamlitConsole:
     def __init__(self, placeholder):
         self.placeholder = placeholder
         self.buffer = []
 
     def write(self, text):
-        # 1. Безопасное декодирование бинарных данных при сигналах прерывания (Ctrl+C / click.secho)
         if isinstance(text, bytes):
             text = text.decode("utf-8", errors="replace")
         elif not isinstance(text, str):
@@ -43,11 +128,8 @@ class StreamlitConsole:
         clean_text = text.strip()
         if clean_text:
             self.buffer.append(clean_text)
-            # Ограничиваем буфер последними 30 строками для экономии памяти UI
             if len(self.buffer) > 30:
                 self.buffer.pop(0)
-
-            # Безопасная склейка только строковых элементов
             display_text = "\n".join(str(item) for item in self.buffer)
             self.placeholder.code(display_text, language="bash")
 
@@ -59,7 +141,6 @@ class StreamlitConsole:
         self.placeholder.empty()
 
 
-# --- Пользовательские стили ---
 st.markdown(
     """
     <style>
@@ -85,7 +166,6 @@ tab_edit, tab_upload, tab_export = st.tabs([
     "3. Экспорт в Qdrant"
 ])
 
-# --- Вкладка 1: Просмотр и редактирование JSON ---
 with tab_edit:
     st.header("Редактирование обработанных страниц")
 
@@ -102,6 +182,7 @@ with tab_edit:
         if st.session_state.selected_book != selected_book:
             st.session_state.selected_book = selected_book
             st.session_state.current_page_index = 0
+            st.session_state.pop("smart_reparse_result", None)
 
         book_path = RESULT_DIR / selected_book
 
@@ -120,7 +201,7 @@ with tab_edit:
                     with open(book_path / filename, "r", encoding="utf-8") as temp_f:
                         temp_data = json.load(temp_f)
                         if temp_data.get("is_verified", False):
-                            return f"✅ Страница {page_num}"
+                            return f"📄 Страница {page_num}"
                         if temp_data.get("analysis_status") == "warning":
                             errors = ", ".join(temp_data.get("errors", []))
                             return f"⚠️ Страница {page_num} ({errors})"
@@ -128,7 +209,6 @@ with tab_edit:
                     pass
                 return f"📄 Страница {page_num}"
 
-            # Навигация по страницам
             nav_col1, nav_col2, nav_col3 = st.columns([1, 2, 1])
 
             with nav_col1:
@@ -137,6 +217,7 @@ with tab_edit:
                 if st.button("⬅️ Предыдущая", width="stretch"):
                     if st.session_state.current_page_index > 0:
                         st.session_state.current_page_index -= 1
+                        st.session_state.pop("smart_reparse_result", None)
                         st.rerun()
 
             with nav_col2:
@@ -153,11 +234,13 @@ with tab_edit:
                 if st.button("Следующая ➡️", type="primary", width="stretch"):
                     if st.session_state.current_page_index < len(json_files) - 1:
                         st.session_state.current_page_index += 1
+                        st.session_state.pop("smart_reparse_result", None)
                         st.rerun()
 
             current_selected_index = json_files.index(selected_file)
             if current_selected_index != st.session_state.current_page_index:
                 st.session_state.current_page_index = current_selected_index
+                st.session_state.pop("smart_reparse_result", None)
                 st.rerun()
 
             file_path = book_path / selected_file
@@ -165,7 +248,6 @@ with tab_edit:
             with open(file_path, "r", encoding="utf-8") as f:
                 page_data = json.load(f)
 
-                # Индикатор статуса парсинга
                 status = page_data.get("analysis_status", "success")
                 errors = page_data.get("errors", [])
 
@@ -180,8 +262,8 @@ with tab_edit:
                 col_text, col_img = st.columns(2)
 
                 with col_text:
-                    st.subheader("📝 Редактирование данных")
-                    editor_tab, preview_tab = st.tabs(["✏️ Редактор", "👁️ Превью Markdown"])
+                    st.subheader("📝 Данные страницы")
+                    editor_tab, preview_tab, smart_tab = st.tabs(["✏️ Редактор", "👁️ Превью", "🤖 Умный перепарс"])
 
                     with editor_tab:
                         with st.form(key=f"edit_form_{selected_book}_{selected_file}"):
@@ -190,18 +272,13 @@ with tab_edit:
                             new_text = st.text_area(
                                 "Очищенный текст (refined_text)",
                                 page_data.get("refined_text", ""),
-                                height=600
+                                height=500
                             )
                             is_verified = st.checkbox(
                                 "✅ Подтверждаю, что страница проверена и готова для базы",
                                 value=page_data.get("is_verified", False)
                             )
-                            submit_button = st.form_submit_button(
-                                "💾 Сохранить изменения в JSON",
-                                width="stretch"
-                            )
-
-                            if submit_button:
+                            if st.form_submit_button("💾 Сохранить изменения", width="stretch"):
                                 page_data["topic"] = new_topic
                                 page_data["tags"] = new_tags
                                 page_data["refined_text"] = new_text
@@ -209,6 +286,7 @@ with tab_edit:
                                 with open(file_path, "w", encoding="utf-8") as save_f:
                                     json.dump(page_data, save_f, ensure_ascii=False, indent=4)
                                 st.success("Файл успешно обновлен!")
+                                time.sleep(0.5)
                                 st.rerun()
 
                     with preview_tab:
@@ -216,6 +294,70 @@ with tab_edit:
                         st.caption(f"**Теги:** {page_data.get('tags', 'Нет тегов')}")
                         st.divider()
                         st.markdown(page_data.get("refined_text", ""))
+
+                    with smart_tab:
+                        st.info("💡 **Human-in-the-Loop:** Точечный перепарс сложной страницы с помощью Gemini 3.7.")
+                        current_page_num = extract_page_number(selected_file)
+
+                        use_prev_page = st.checkbox(
+                            f"📄 Прикрепить текст прошлой страницы (Стр. {current_page_num - 1}) для восстановления шапки",
+                            value=True
+                        )
+                        use_next_page = st.checkbox(
+                            f"📄 Прикрепить текст следующей страницы (Стр. {current_page_num + 1})"
+                        )
+                        use_draft_text = st.checkbox(
+                            "📝 Использовать текущий текст страницы как черновик",
+                            value=True
+                        )
+
+                        custom_instructions = st.text_area(
+                            "✍️ Указания врачу-эксперту (опционально):",
+                            placeholder="Например: В черновике вместо 'Столбец 1' должен быть 'Варфарин'. Замени все абстрактные столбцы на названия препаратов из прошлой страницы."
+                        )
+
+                        if st.button("🚀 Сгенерировать новый вариант", type="primary", width="stretch"):
+                            with st.spinner("🧠 Gemini 3.7 Flash анализирует страницу с учетом контекста..."):
+                                try:
+                                    pdf_path_full = DATA_DIR / f"{selected_book}.pdf"
+                                    new_result = run_smart_reparse(
+                                        book_path_pdf=pdf_path_full,
+                                        book_name_str=selected_book,
+                                        page_number=current_page_num,
+                                        use_prev=use_prev_page,
+                                        use_next=use_next_page,
+                                        use_draft=use_draft_text,
+                                        current_draft=page_data.get("refined_text", ""),
+                                        custom_prompt=custom_instructions
+                                    )
+                                    st.session_state.smart_reparse_result = new_result
+                                except Exception as e:
+                                    st.error(f"Ошибка перепарса: {e}")
+
+                        if st.session_state.get("smart_reparse_result"):
+                            st.divider()
+                            st.markdown("### 🔍 Сравнение результатов")
+
+                            diff_col1, diff_col2 = st.columns(2)
+                            with diff_col1:
+                                st.markdown("**Текущий текст в базе:**")
+                                st.info(page_data.get("refined_text", ""))
+                            with diff_col2:
+                                st.markdown("**Новый результат (Gemini 3.7):**")
+                                st.success(st.session_state.smart_reparse_result)
+
+                            if st.button("✅ Утвердить и заменить текст в JSON", type="primary", width="stretch"):
+                                page_data["refined_text"] = st.session_state.smart_reparse_result
+                                page_data["analysis_status"] = "success"
+                                page_data["errors"] = []
+                                page_data["is_verified"] = True
+
+                                with open(file_path, "w", encoding="utf-8") as save_f:
+                                    json.dump(page_data, save_f, ensure_ascii=False, indent=4)
+                                st.session_state.pop("smart_reparse_result", None)
+                                st.success("🎉 Успешно заменено! Данные сохранены.")
+                                time.sleep(1)
+                                st.rerun()
 
                 with col_img:
                     st.subheader("🖼️ Оригинал страницы")
@@ -235,7 +377,6 @@ with tab_edit:
                     else:
                         st.warning(f"Исходный файл '{selected_book}.pdf' не найден в папке data.")
 
-# --- Вкладка 2: Загрузка и парсинг ---
 with tab_upload:
     st.header("Управление книгами (Папка data)")
 
@@ -283,7 +424,6 @@ with tab_upload:
             st.markdown("### 🖥️ Живой лог обработки:")
             log_container = st.empty()
 
-            # Инициализируем консоль логов
             console = StreamlitConsole(log_container)
             old_stdout = sys.stdout
             sys.stdout = console
@@ -322,7 +462,6 @@ with tab_upload:
     else:
         st.info("Папка data пуста. Пожалуйста, загрузите PDF-файл.")
 
-# --- Вкладка 3: Экспорт в Qdrant ---
 with tab_export:
     st.header("Векторизация и загрузка в Qdrant")
 

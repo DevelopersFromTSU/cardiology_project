@@ -56,7 +56,6 @@ def run_pipeline(book_path, output_folder, start_page, end_page):
                     last_table_title = table_match.group(1).strip()
                     last_row_state = {}
 
-                # Передаем оригинальный текст напрямую в LLM-рефайнер
                 refined_text = refine_medical_chunk(raw_text)
                 if refined_text:
                     page_final_blocks.append(refined_text)
@@ -78,7 +77,6 @@ def run_pipeline(book_path, output_folder, start_page, end_page):
                 if extracted_state and isinstance(extracted_state, dict):
                     last_row_state = extracted_state
 
-                # Описание изображения добавляется напрямую без слепой Regex-обработки
                 if vision_description.strip():
                     page_final_blocks.append(vision_description)
 
@@ -86,7 +84,7 @@ def run_pipeline(book_path, output_folder, start_page, end_page):
         if not combined_page_text:
             continue
 
-        # 3. Единая генерация топика и тегов по всему тексту страницы
+        # 3. Генерация топика и тегов по всему тексту страницы
         page_topic = "Не определена"
         page_tags = "Нет тегов"
 

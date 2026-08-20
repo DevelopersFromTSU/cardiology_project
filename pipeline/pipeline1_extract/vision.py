@@ -73,7 +73,6 @@ PROMPT_TEXT_TABLE = (
     "5. ЕДИНИЦЫ ИЗМЕРЕНИЯ (ИСКЛЮЧЕНИЕ ИЗ ПРАВИЛА): Если значения представлены 'голыми' цифрами, но из контекста (легенды, оси, заголовки, сноски) понятно их измерение (например, %, мг, ммоль/л), ОБЯЗАТЕЛЬНО прикрепляй эти единицы к цифрам (например, пиши '27%', а не '27')."
 )
 
-
 PROMPTS_MAP = {
     ImageCategory.FLOWCHART: PROMPT_FLOWCHART,
     ImageCategory.MATRIX: PROMPT_MATRIX,
@@ -204,7 +203,7 @@ def describe_image(pil_img, previous_table_title=None, previous_row_state=None, 
         state_json_str = json.dumps(previous_row_state, ensure_ascii=False)
 
         continuation_prompt += (
-            f"\nКРИТИЧЕСКОЕ ПРАВИЛО ПЕРЕНОСА (РАЗРЫВ ТАБЛИЦЫ):\n"
+            f"\n\nКРИТИЧЕСКОЕ ПРАВИЛО ПЕРЕНОСА (РАЗРЫВ ТАБЛИЦЫ):\n"
             f"1. ШАПКА ТАБЛИЦЫ: На этой картинке нет заглавных столбцов. Ты ОБЯЗАН использовать следующие названия столбцов из прошлой страницы: {headers_list}.\n"
             f"2. СТРОГАЯ ПРИВЯЗКА: Мысленно наложи эти столбцы слева направо на текущую картинку и формируй условия (context) строго по ним.\n"
             f"3. СКЛЕЙКА СТРОК: Вот последняя строка прошлой страницы: {state_json_str}. Если первая строка на этой картинке оборвана и выглядит как логическое завершение прошлой — объедини их."
@@ -245,18 +244,13 @@ def describe_image(pil_img, previous_table_title=None, previous_row_state=None, 
         media_resolution=types.MediaResolution.MEDIA_RESOLUTION_HIGH
     )
 
-    # Базовая модель по умолчанию в зависимости от категории изображения
-    base_model = "gemini-3.5-flash-lite" if category == ImageCategory.TEXT_TABLE else "gemini-3.7-flash"
+    target_model = "gemini-3.7-flash"
+    print(f"🤖 Для генерации выбрана модель: {target_model}")
 
     for attempt in range(max_retries):
         try:
-            # Если легкая модель вернула пустой результат или упала с 1-й попытки — эскалируем на gemini-3.7-flash
-            current_model = "gemini-3.7-flash" if attempt > 0 else base_model
-            if attempt > 0 and current_model != base_model:
-                print(f"⚡ Эскалация: переключаем попытку {attempt + 1} на тяжелую модель {current_model}...")
-
             response = client.models.generate_content(
-                model=current_model,
+                model=target_model,
                 contents=user_content,
                 config=config
             )
@@ -268,7 +262,8 @@ def describe_image(pil_img, previous_table_title=None, previous_row_state=None, 
 
             data = json.loads(response.text)
 
-            if data.get("analysis_status") == "success" and (data.get("facts") or data.get("diagram_summary") or data.get("plain_text_blocks")):
+            if data.get("analysis_status") == "success" and (
+                    data.get("facts") or data.get("diagram_summary") or data.get("plain_text_blocks")):
                 global_ctx = str(data.get("global_context") or "").strip()
                 source_type = str(data.get("source_type") or "").strip()
 
@@ -278,10 +273,6 @@ def describe_image(pil_img, previous_table_title=None, previous_row_state=None, 
                     for cell in raw_row_list:
                         if isinstance(cell, dict) and "column_name" in cell and "cell_value" in cell:
                             row_state[cell["column_name"]] = cell["cell_value"]
-
-                non_empty_vals = [str(val).strip() for val in row_state.values() if str(val).strip()]
-                if non_empty_vals and all(val.endswith((".", "!", "?", ";")) for val in non_empty_vals):
-                    row_state = {}
 
                 current_table_title = None
                 if source_type.lower() in ["таблица", "table", "matrix", "text_table"]:
