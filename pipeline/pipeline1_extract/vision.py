@@ -1,5 +1,6 @@
 import os
 import json
+import time
 from enum import Enum
 from dotenv import load_dotenv
 from google import genai
@@ -8,7 +9,6 @@ from pydantic import BaseModel, Field
 import cv2
 import numpy as np
 from PIL import Image, ImageEnhance, ImageFilter
-import time
 
 load_dotenv()
 
@@ -21,56 +21,44 @@ class ImageCategory(str, Enum):
 
 class ImageRouter(BaseModel):
     category: ImageCategory = Field(
-        description="Категория медицинского изображения: "
-                    "'flowchart' (блок-схемы, алгоритмы со стрелками), "
-                    "'matrix' (плотные цифровые сетки SCORE2), "
-                    "'text_table' (классические текстовые таблицы)."
+        description="Категория медицинского изображения: 'flowchart', 'matrix', 'text_table'."
     )
 
 
 PROMPT_MATRIX = (
-    "Перед тобой плотная многомерная матрица (например, тепловая карта рисков, шкала стратификации, сложная сетка дозировок).\n"
-    "ТВОЯ ЦЕЛЬ: Подготовить изолированные чанки данных для векторной базы (RAG-системы). База ищет информацию по точным пересечениям параметров, поэтому точность координат критична.\n"
-    "КРИТИЧЕСКИ ВАЖНЫЕ ПРАВИЛА:\n"
-    "1. ТОЧНЫЕ КООРДИНАТЫ (ОСЬ Y + ОСЬ X): В 'context' собери путь по оси Y (боковые категории), используя короткие "
-    "напечатанные аббревиатуры (например, пиши 'КК 30-50', а не 'Клиренс креатинина'). В 'value' ОБЯЗАТЕЛЬНО привяжи "
-    "цифры к их колонкам (ось X). Если точных заголовков у колонок нет, КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО их додумывать! В "
-    "таком случае укажи общий видимый заголовок перед массивом (Пример 'value': '[Название группы/оси]: 27%, 28%, "
-    "30% (Цвет фона)'). ВНИМАНИЕ: Обязательно ищи вертикально напечатанные заголовки осей. Если над колонкой цифр написано другое слово (например, название самой таблицы), не путай его с осью!\n"
-    "2. ГОРИЗОНТАЛЬНАЯ ГРУППИРОВКА (ОПТИМИЗАЦИЯ): Чтобы не перегружать ответ, КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО создавать объект для каждой ячейки отдельно. Собери весь ряд значений по горизонтали в одно поле 'value' с соблюдением осей из пункта 1.\n"
-    "3. ИЗОЛЯЦИЯ: Никогда не смешивай разные глобальные блоки (например, разные гендерные вкладки, возрастные группы или стадии болезни) в одном факте. Каждая логическая строка матрицы — это один независимый объект JSON.\n"
-    "4. ПУСТЫЕ ЗОНЫ: Игнорируй пустые ячейки и графический мусор.\n"
-    "5. ЕДИНИЦЫ ИЗМЕРЕНИЯ (ИСКЛЮЧЕНИЕ ИЗ ПРАВИЛА): Если значения представлены 'голыми' цифрами, но из контекста (легенды, оси, заголовки, сноски) понятно их измерение (например, %, мг, ммоль/л), ОБЯЗАТЕЛЬНО прикрепляй эти единицы к цифрам (например, пиши '27%', а не '27')."
+    "Перед тобой плотная многомерная матрица (шкала рисков SCORE2, стратификация, сетка дозировок).\n"
+    "ТВОЯ ЦЕЛЬ: Подготовить изолированные чанки данных для RAG-системы. Точность координат критична.\n"
+    "1. ТОЧНЫЕ КООРДИНАТЫ: В 'context' собери путь по оси Y. В 'value' ОБЯЗАТЕЛЬНО привяжи цифры к их колонкам (ось X). Ищи вертикальные заголовки осей.\n"
+    "2. ГОРИЗОНТАЛЬНАЯ ГРУППИРОВКА: Собери весь ряд значений по горизонтали в одно поле 'value' с соблюдением осей.\n"
+    "3. ИЗОЛЯЦИЯ: Каждая логическая строка матрицы — это один независимый объект JSON.\n"
+    "4. ПУСТЫЕ ЗОНЫ: Игнорируй пустые ячейки.\n"
+    "5. ЕДИНИЦЫ ИЗМЕРЕНИЯ: Обязательно прикрепляй единицы измерения (%, мг, ммоль/л) к 'голым' цифрам."
 )
 
 PROMPT_FLOWCHART = (
-    "Перед тобой медицинское визуальное представление (клинический алгоритм, описательная инфографика, матрица, патогенетический цикл или анатомическая схема).\n"
-    "ТВОЯ ЦЕЛЬ: Оцифровать данные для RAG-системы. Векторная база ищет по парам 'Ключ (context) -> Значение (value)'. Твоя задача — быть точным аналитиком, а не пересказывать суть своими словами.\n"
-    "КРИТИЧЕСКИ ВАЖНЫЕ ПРАВИЛА:\n"
-    "1. АДАПТИВНОЕ ИЗВЛЕЧЕНИЕ СВЯЗЕЙ:\n"
-    "   - Алгоритмы: В 'context' пиши [Родитель -> Условие перехода], в 'value' — [Целевой блок/Действие].\n"
-    "   - Описания/Анатомия: В 'context' — [Название структуры], в 'value' — [Описание/Функция].\n"
-    "   - Матрицы/Графики: В 'context' — [Ось X, Ось Y], в 'value' — [Показатель].\n"
-    "   - Циклы: В 'context' — [Текущий этап], в 'value' — [Следующий этап].\n"
-    "2. ОПТИМИЗАЦИЯ И ЦЕЛОСТНОСТЬ: Объединяй общие условия. Не дроби списки препаратов/симптомов в целевом блоке — пиши всё в одно поле 'value'. Если блоки имеют общий фон — добавляй его в 'context'.\n"
-    "3. АББРЕВИАТУРЫ И ГРАММАТИКА (СТРОГО!): Сохраняй аббревиатуры (АГ, ИМ, КТ, СМАД) КАК ЕСТЬ. Категорически запрещено расшифровывать их в лоб, если это ломает русский язык (например, нельзя писать 'лечение резистентной артериальная гипертензия (АГ)').\n"
-    "4. ЕДИНИЦЫ ИЗМЕРЕНИЯ: Если видишь голые цифры, но из схемы понятно измерение (%, мг), обязательно дописывай его к цифре.\n"
-    "5. ИЗОЛИРОВАННЫЙ ТЕКСТ И СНОСКИ (КРИТИЧНО): НЕ ПЫТАЙСЯ встраивать сноски (¹, ²) внутрь узлов! Весь мелкий шрифт, "
-    "расшифровки под звездочками и сопроводительные плавающие абзацы (например, демографические данные) скопируй 'как "
-    "есть' и помести в массив `footnotes`. Если массива нет, добавь их в конец `diagram_summary`. Ни одно слово с "
-    "картинки не должно быть потеряно! КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО выдумывать 'легенду' или самостоятельно расшифровывать "
-    "сноски (¹, ², ³), основываясь на названиях блоков!"
+    "Перед тобой медицинское визуальное представление (алгоритм, схема лечения, цикл или анатомическая схема).\n"
+    "ТВОЯ ЦЕЛЬ: Оцифровать данные для RAG-системы 'Ключ -> Значение'.\n"
+    "1. АДАПТИВНОЕ ИЗВЛЕЧЕНИЕ: В 'context' пиши [Родитель -> Условие перехода], в 'value' — [Целевой блок/Действие].\n"
+    "2. ОПТИМИЗАЦИЯ: Объединяй общие условия. Не дроби списки препаратов.\n"
+    "3. АББРЕВИАТУРЫ: Сохраняй аббревиатуры (АГ, ИМ, КТ, СМАД) КАК ЕСТЬ.\n"
+    "4. ЕДИНИЦЫ ИЗМЕРЕНИЯ: Дописывай их к цифрам.\n"
+    "5. СНОСКИ: Весь мелкий шрифт помести в массив `footnotes`. НЕ встраивай сноски внутрь узлов!"
 )
 
 PROMPT_TEXT_TABLE = (
-    "Перед тобой текстовая таблица сложной структуры.\n"
-    "ТВОЯ ЦЕЛЬ: Извлечь факты для векторного поиска (RAG). Базе нужны короткие, точные факты с полным контекстом, а не длинные простыни текста.\n"
-    "КРИТИЧЕСКИ ВАЖНЫЕ ПРАВИЛА:\n"
-    "1. ГЛУБОКАЯ 2D-ИЕРАРХИЯ (ВЕРТИКАЛЬ + ГОРИЗОНТАЛЬ): В поле 'context' собери АБСОЛЮТНО ВЕСЬ иерархический путь ячейки. Сканируй структуру вверх и влево! Если над группой параметров есть промежуточная объединяющая строка-подзаголовок (например, категория, синдром или диагноз, к которому относятся все строки ниже), КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО ее терять. Полный путь должен выглядеть так: [Главный заголовок столбца | Глобальная категория | Промежуточный подзаголовок (если есть) | Название конкретной строки].\n"
-    "2. ГРАНУЛЯРНОСТЬ ДАННЫХ (ОБЯЗАТЕЛЬНО): Если в ячейке находится маркированный список (через тире, точки, цифры или просто абзацы), КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО сливать его в один длинный текст! Разбей каждый пункт списка на отдельный, независимый факт (отдельный объект JSON). При этом для каждого такого факта ПОЛНОСТЬЮ дублируй родительский 'context'.\n"
-    "3. ЦЕЛОСТНОСТЬ ПРЕДЛОЖЕНИЙ: Извлекай текст самого факта целиком, не обрезая слова.\n"
-    "4. СНОСКИ: Сохраняй символы сносок рядом со словом.\n"
-    "5. ЕДИНИЦЫ ИЗМЕРЕНИЯ (ИСКЛЮЧЕНИЕ ИЗ ПРАВИЛА): Если значения представлены 'голыми' цифрами, но из контекста (легенды, оси, заголовки, сноски) понятно их измерение (например, %, мг, ммоль/л), ОБЯЗАТЕЛЬНО прикрепляй эти единицы к цифрам (например, пиши '27%', а не '27')."
+    "Перед тобой текстовая таблица (многоколоночная или одноколоночный список критериев/чек-лист).\n"
+    "ТВОЯ ЦЕЛЬ: Извлечь атомарные факты для векторного поиска (RAG).\n\n"
+    "1. ГЛУБОКАЯ 2D-ИЕРАРХИЯ В 'context':\n"
+    "   - Для многоколоночных таблиц: [Заголовок столбца | Глобальная категория | Название строки].\n"
+    "   - Для одноколоночных таблиц и списков: выноси жирные строки-разделители и категории верхнего уровня в 'context' как иерархический путь: [Название таблицы | Глобальная категория | Подкатегория].\n\n"
+    "2. ГРАНУЛЯРНОСТЬ И ВЛОЖЕННЫЕ СПИСКИ:\n"
+    "   - Каждый пункт списка (•, ◦, тире) извлекай как ОТДЕЛЬНЫЙ факт, полностью дублируя родительский 'context'.\n"
+    "   - Если внутри пункта указано название параметра или критерия, выноси его имя в 'context', а пороговые значения, формулы и описания — в 'value'.\n\n"
+    "3. ЦЕЛОСТНОСТЬ И СКЛЕЙКА ПЕРЕНОСОВ:\n"
+    "   - Склеивай многострочные предложения внутри одного пункта в один связный текст без разрывов.\n\n"
+    "4. СНОСКИ И ЕДИНИЦЫ ИЗМЕРЕНИЯ:\n"
+    "   - Обязательно прикрепляй единицы измерения к цифрам.\n"
+    "   - Сохраняй символы сносок рядом со словами, а полный текст сносок помещай в массив footnotes."
 )
 
 PROMPTS_MAP = {
@@ -85,74 +73,51 @@ class ExtractedFact(BaseModel):
     value: str = Field(description="Итоговые значения, действия или связи.")
 
 
-class RowStateCell(BaseModel):
-    column_name: str = Field(description="Название колонки.")
-    cell_value: str = Field(description="Точный текст ячейки.")
-
-
 class ImageExtraction(BaseModel):
     analysis_status: str = Field(description="Статус: 'success' или 'failed'")
-    diagram_summary: str = Field(default="", description="Описание схем и графиков.")
-    source_type: str = Field(description="Тип контента")
-    global_context: str = Field(description="Общее название изображения")
-    last_row_state: list[RowStateCell] = Field(default=[])
-    plain_text_blocks: list[str] = Field(
-        default=[],
-        description="Сплошные абзацы текста (например, введения или выводы), не являющиеся схемой. Копировать СЛОВО В СЛОВО."
-    )
-    facts: list[ExtractedFact] = Field(
-        description="Массив извлеченных данных ТОЛЬКО из таблиц и блок-схем: строго логические связи."
-    )
-    footnotes: list[str] = Field(
-        default=[],
-        description="Массив всех сносок внизу страницы."
-    )
+    diagram_summary: str = Field(default="", description="ТОЛЬКО для блок-схем (flowchart): цепочка шагов. Для таблиц оставить пустым.")
+    source_type: str = Field(description="Тип контента (flowchart, matrix, text_table)")
+    global_context: str = Field(description="Общее название изображения/таблицы")
+    plain_text_blocks: list[str] = Field(default=[], description="Сплошные абзацы текста, не являющиеся схемой/таблицей.")
+    facts: list[ExtractedFact] = Field(description="Массив извлеченных фактов: логические пары Условия -> Значение.")
+    footnotes: list[str] = Field(default=[], description="Массив сносок внизу страницы.")
 
 
-def classify_image_category(pil_img, max_retries=3) -> ImageCategory:
-    """Классификатор типа изображения с легкой моделью."""
+def classify_image_category(pil_img) -> ImageCategory:
     client = genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
-
     router_img = pil_img.copy()
     router_img.thumbnail((512, 512))
 
-    sys_instr = (
-        "Ты — эксперт-классификатор медицинских документов. Твоя единственная задача — посмотреть "
-        "на изображение и определить его визуальный класс для последующей оцифровки."
-    )
-
     config = types.GenerateContentConfig(
-        system_instruction=sys_instr,
+        system_instruction="Определи визуальный класс медицинского изображения для последующей оцифровки.",
         temperature=0.0,
         response_mime_type="application/json",
         response_schema=ImageRouter,
     )
 
-    for attempt in range(max_retries):
+    model_name = "gemini-3.5-flash-lite"
+    max_retries = 20
+    attempt = 1
+
+    while attempt <= max_retries:
         try:
-            print(f"🔍 LLM-роутер: классифицирую изображение (попытка {attempt + 1}/{max_retries})...")
             response = client.models.generate_content(
-                model="gemini-3.5-flash-lite",
+                model=model_name,
                 contents=[router_img, "Определи категорию изображения."],
                 config=config
             )
-
-            if response.usage_metadata:
-                print(f"📊 [Роутер] Токены -> Вход: {response.usage_metadata.prompt_token_count} | "
-                      f"Выход: {response.usage_metadata.candidates_token_count} | "
-                      f"Всего: {response.usage_metadata.total_token_count}")
-
             data = json.loads(response.text)
-            return ImageCategory(data.get("category", ImageCategory.TEXT_TABLE))
-
+            category = ImageCategory(data.get("category", ImageCategory.TEXT_TABLE))
+            print(f"🖼️ [Vision Router] Найдена картинка -> Класс: '{category.value}' (Модель: {model_name})")
+            return category
         except Exception as e:
-            print(f"⚠️ Ошибка роутера (попытка {attempt + 1}/{max_retries}): {e}")
-            if attempt < max_retries - 1:
-                print("🔄 Ждем 5 секунд и повторяем запрос к API...")
-                time.sleep(5)
-            else:
-                print("❌ Все попытки исчерпаны. Откат на класс по умолчанию (text_table).")
+            print(f"⚠️ [Vision Router] Ошибка API ({model_name}, попытка {attempt}): {e}")
+            if attempt == max_retries:
+                print(f"❌ [Vision Router] Фатальная ошибка после {max_retries} попыток. Возвращаем TEXT_TABLE по умолчанию.")
                 return ImageCategory.TEXT_TABLE
+            print("🔄 Повтор через 5 сек...")
+            time.sleep(5)
+            attempt += 1
 
 
 def slice_image_smart_opencv(pil_img):
@@ -170,14 +135,13 @@ def slice_image_smart_opencv(pil_img):
     for cnt in contours:
         x, y, w, h = cv2.boundingRect(cnt)
         if w > 150 and h > 50:
-            crop = pil_img.crop((x, y, x + w, y + h))
-            crops.append(crop)
+            crops.append(pil_img.crop((x, y, x + w, y + h)))
     return crops if crops else [pil_img]
 
 
-def describe_image(pil_img, previous_table_title=None, previous_row_state=None, max_retries=10):
+def describe_image(pil_img, previous_table_title=None, previous_page_text=None):
     if pil_img is None:
-        return "", None, {}
+        return "", None, False
 
     def enhance_for_ocr(img):
         enhancer = ImageEnhance.Contrast(img)
@@ -189,34 +153,36 @@ def describe_image(pil_img, previous_table_title=None, previous_row_state=None, 
     client = genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
 
     category = classify_image_category(pil_img)
-    print(f"🎯 Роутер определил категорию: {category.value}")
-
+    is_table_img = category in [ImageCategory.TEXT_TABLE, ImageCategory.MATRIX]
     use_opencv = (category == ImageCategory.MATRIX)
+
     specialized_prompt = PROMPTS_MAP.get(category, PROMPT_TEXT_TABLE)
 
     continuation_prompt = ""
     if previous_table_title:
-        continuation_prompt += f"\nВНИМАНИЕ: Это изображение — продолжение таблицы '{previous_table_title}' с предыдущей страницы."
+        continuation_prompt += f"\nВозможно, это продолжение таблицы '{previous_table_title}' с предыдущей страницы."
 
-    if previous_row_state and isinstance(previous_row_state, dict) and len(previous_row_state) > 0:
-        headers_list = list(previous_row_state.keys())
-        state_json_str = json.dumps(previous_row_state, ensure_ascii=False)
-
+    if previous_page_text and is_table_img:
         continuation_prompt += (
-            f"\n\nКРИТИЧЕСКОЕ ПРАВИЛО ПЕРЕНОСА (РАЗРЫВ ТАБЛИЦЫ):\n"
-            f"1. ШАПКА ТАБЛИЦЫ: На этой картинке нет заглавных столбцов. Ты ОБЯЗАН использовать следующие названия столбцов из прошлой страницы: {headers_list}.\n"
-            f"2. СТРОГАЯ ПРИВЯЗКА: Мысленно наложи эти столбцы слева направо на текущую картинку и формируй условия (context) строго по ним.\n"
-            f"3. СКЛЕЙКА СТРОК: Вот последняя строка прошлой страницы: {state_json_str}. Если первая строка на этой картинке оборвана и выглядит как логическое завершение прошлой — объедини их."
+            f"\n\n--- ЭТАЛОННЫЙ КОНТЕКСТ И ШАПКИ ПРЕДЫДУЩЕЙ СТРАНИЦЫ ---\n{previous_page_text}\n\n"
+            f"ПРАВИЛА ОБРАБОТКИ РАЗРЫВА ТАБЛИЦЫ:\n"
+            f"1. ШАПКА ТАБЛИЦЫ: Если на картинке продолжается таблица без заглавных столбцов, восстанови названия колонок и путь 'context' из последних блоков 'Условия: [...]' прошлой страницы.\n"
+            f"2. СКЛЕЙКА ОБОРАВАННОЙ СТРОКИ: Если первая ячейка на текущей картинке является остатком фразы, оборванной внизу прошлой страницы (например, начинается со строчной буквы), ОБЯЗАТЕЛЬНО восстанови полный 'context' (активный препарат/параметр) из последней строки прошлой страницы. Категорически запрещено выдумывать абстрактные контексты вроде '[Риск и клинический эффект]'!\n"
+            f"3. НОВАЯ ТАБЛИЦА: Если на картинке представлена самостоятельная новая таблица со своей шапкой — полностью проигнорируй текст прошлой страницы."
         )
 
     sys_instr = (
-        "Ты — бездушный OCR-парсер и координатный экстрактор. Твоя единственная задача — перенести текст с картинки в JSON с абсолютной, буквальной точностью.\n\n"
-        "КРИТИЧЕСКИЕ ПРАВИЛА:\n"
-        "1. СТРУКТУРА ТЕКСТА: Если видишь обычный абзац текста (не схему) — помести его целиком в 'plain_text_blocks', не пытайся разбивать его на условия и значения!\n"
-        "2. КАТЕГОРИЧЕСКИЙ ЗАПРЕЩЕНО: Не переводи, не интерпретируй и не расшифровывай аббревиатуры. Пиши строго как в оригинале (например, 'АГ', 'СМАД', 'ИМ').\n"
-        "3. СОХРАНЕНИЕ ИНДЕКСОВ: Сноски (¹, ², ³) переноси вместе со словами без пробелов.\n"
-        "4. ЧИСТОТА КОНТЕКСТА: Не дублируй главное название таблицы (оно уже в 'global_context') в каждый 'context' факта.\n"
-        "5. ОПИСАНИЕ СХЕМЫ (diagram_summary): Если схема требует текстового описания структуры, напиши его, опираясь ТОЛЬКО на видимые термины. Не придумывай патогенез или алгоритмы, если их нет на картинке.\n\n"
+        "Ты — высокоточный медицинский дата-экстрактор клинических руководств.\n"
+        "Твоя задача — извлекать клинические правила в формате: 'Условия: [Иерархический контекст] => Значение: [Факты/Показатели]'.\n\n"
+        "ПРАВИЛА:\n"
+        "1. ЧИСТОТА КОНТЕКСТА: 'context' должен содержать только реальные медицинские сущности (препараты, дозы, шкалы, градации, исходы).\n"
+        "2. АББРЕВИАТУРЫ: Сохраняй стандартные медицинские сокращения (АГ, ДСУ, АВБ, ЧСС) в оригинальном виде.\n"
+        "3. СНОСКИ И ЕДИНИЦЫ ИЗМЕРЕНИЯ (СТРОГО):\n"
+        "   - Внутри текста и значений фактов НЕ используй надстрочные цифры-индексы (¹, ², ³, ⁴). Форматируй сноски через пробел и скобки: '[1]', '[2]' или '[сноска 1]'. Категорически запрещено приклеивать сноски к словам (пиши 'заболевание [1]', а не 'заболевание¹').\n"
+        "   - ЕДИНИЦЫ ИЗМЕРЕНИЯ ПЛОЩАДИ: Единицы 'м²' (метры квадратные) и 'кг/м²' должны ВСЕГДА оставаться со степенью ² (квадрат). Не заменяй 'м²' на 'м³' или 'м⁴' из-за номеров сносок (пиши строго: '1,73 м² [3]', '1,73 м² [4]').\n"
+        "   - Полные расшифровки сносок внизу страницы переписывай в массив footnotes целиком до последней буквы и цифры без сокращений и многоточий ('...').\n"
+        "4. ПОСТОРОННИЙ ТЕКСТ И ЗАГОЛОВКИ СНИЗУ/СВЕРХУ (СТРОГИЙ ЗАПРЕТ): Если в область картинки снизу или сверху попали заголовки следующих разделов (например, 'Приложение Б...', 'Глава ...', 'Раздел ...'), названия новых таблиц или абзацы текста БЕЗ маркеров сносок — ПОЛНОСТЬЮ ПРОИГНОРИРУЙ ИХ. Не добавляй их ни в facts, ни в footnotes, ни в plain_text_blocks (их обрабатывает текстовый парсер).\n"
+        "5. ЦЕЛОСТНОСТЬ ДАННЫХ: Не разрывай предложения на части. Не выдумывай и не вставляй искусственные заголовки (например, 'Продолжение таблицы') или маркеры '[текст обрывается]' внутри фактов, если их физически нет на самой картинке.\n\n"
         f"--- СПЕЦИАЛЬНЫЕ ПРАВИЛА ДЛЯ КЛАССА [{category.value.upper()}]: ---\n"
         f"{specialized_prompt}\n\n"
         f"{continuation_prompt}\n"
@@ -224,16 +190,11 @@ def describe_image(pil_img, previous_table_title=None, previous_row_state=None, 
 
     user_content = []
     if use_opencv:
-        print("✂️ Включаем OpenCV-нарезку для табличного контента.")
-        image_slices = slice_image_smart_opencv(pil_img)
-        user_content.extend(image_slices)
-        prompt_instruction = "Оцифруй изолированные фрагменты как единое целое по правилам выше."
+        user_content.extend(slice_image_smart_opencv(pil_img))
+        user_content.append("Оцифруй изолированные фрагменты как единое целое по правилам выше.")
     else:
-        print("🖼 Передаем изображение целиком для сохранения связей.")
         user_content.append(pil_img)
-        prompt_instruction = "Оцифруй схему целиком, строго следуя логике связей."
-
-    user_content.append(prompt_instruction)
+        user_content.append("Оцифруй изображение, строго следуя логике связей.")
 
     config = types.GenerateContentConfig(
         system_instruction=sys_instr,
@@ -245,34 +206,19 @@ def describe_image(pil_img, previous_table_title=None, previous_row_state=None, 
     )
 
     target_model = "gemini-3.7-flash"
-    print(f"🤖 Для генерации выбрана модель: {target_model}")
+    max_retries = 20
+    attempt = 1
 
-    for attempt in range(max_retries):
+    while attempt <= max_retries:
         try:
-            response = client.models.generate_content(
-                model=target_model,
-                contents=user_content,
-                config=config
-            )
-
-            if response.usage_metadata:
-                print(f"📊 [Анализатор] Токены -> Вход: {response.usage_metadata.prompt_token_count} | "
-                      f"Выход: {response.usage_metadata.candidates_token_count} | "
-                      f"Всего: {response.usage_metadata.total_token_count}")
-
+            print(f"📊 [Vision Extractor] Оцифровка '{category.value}' (Модель: {target_model}, попытка {attempt}/{max_retries})...")
+            response = client.models.generate_content(model=target_model, contents=user_content, config=config)
             data = json.loads(response.text)
 
             if data.get("analysis_status") == "success" and (
                     data.get("facts") or data.get("diagram_summary") or data.get("plain_text_blocks")):
                 global_ctx = str(data.get("global_context") or "").strip()
                 source_type = str(data.get("source_type") or "").strip()
-
-                raw_row_list = data.get("last_row_state", [])
-                row_state = {}
-                if isinstance(raw_row_list, list):
-                    for cell in raw_row_list:
-                        if isinstance(cell, dict) and "column_name" in cell and "cell_value" in cell:
-                            row_state[cell["column_name"]] = cell["cell_value"]
 
                 current_table_title = None
                 if source_type.lower() in ["таблица", "table", "matrix", "text_table"]:
@@ -283,15 +229,20 @@ def describe_image(pil_img, previous_table_title=None, previous_row_state=None, 
                     else:
                         current_table_title = global_ctx
 
-                text_blocks = [f"--- Контекст изображения: {global_ctx} ({source_type}) ---"]
+                text_blocks = []
+
+                if global_ctx and not any(w in global_ctx.lower() for w in ["фрагмент", "таблица (фрагмент)", "изображение"]):
+                    text_blocks.append(f"### {global_ctx}")
 
                 if data.get("plain_text_blocks"):
                     for block in data["plain_text_blocks"]:
                         text_blocks.append(block)
                     text_blocks.append("")
 
-                if data.get("diagram_summary"):
-                    text_blocks.append(f"Механизмы и связи (описание схемы): {data['diagram_summary']}\n")
+                if data.get("diagram_summary") and category == ImageCategory.FLOWCHART:
+                    clean_summary = data['diagram_summary'].strip()
+                    if clean_summary:
+                        text_blocks.append(f"{clean_summary}\n")
 
                 for fact in data.get("facts", []):
                     text_blocks.append(f"Условия: [{fact['context']}] => Значение: {fact['value']}")
@@ -301,17 +252,21 @@ def describe_image(pil_img, previous_table_title=None, previous_row_state=None, 
                     for note in data["footnotes"]:
                         text_blocks.append(note)
 
-                final_text = "\n".join(text_blocks)
-                return final_text, current_table_title, row_state
+                final_text = "\n".join(text_blocks).strip()
+                return final_text, current_table_title, is_table_img
             else:
-                print(f"⚠️ Ответ модели пустой или status != success (попытка {attempt + 1}/{max_retries})")
+                print(f"⚠️ [Vision Extractor] Ответ пуст или статус failed (попытка {attempt}).")
+                if attempt == max_retries:
+                    return "", None, False
+                print("🔄 Повтор через 5 сек...")
+                time.sleep(5)
+                attempt += 1
 
         except Exception as e:
-            print(f"⚠️ Ошибка Gemini в экстракторе (попытка {attempt + 1}/{max_retries}): {e}")
-            if attempt < max_retries - 1:
-                print("🔄 Ждем 5 секунд перед повторным запросом...")
-                time.sleep(5)
-            else:
-                print("❌ Все попытки распознавания картинки исчерпаны.")
-
-    return "", None, {}
+            print(f"⚠️ [Vision Extractor] Ошибка API ({target_model}, попытка {attempt}): {e}")
+            if attempt == max_retries:
+                print(f"❌ [Vision Extractor] Фатальная ошибка после {max_retries} попыток.")
+                return "", None, False
+            print("🔄 Повтор через 5 сек...")
+            time.sleep(5)
+            attempt += 1

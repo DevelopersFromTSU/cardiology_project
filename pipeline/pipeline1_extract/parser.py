@@ -108,11 +108,11 @@ def parse_pdf_pro(pdf_path, start_page=1, end_page=1):
 
             raw_elements = []
 
-            # ЭТАП 3 — Нарезка картинок
+            # 1. ЭТАП 3 — Нарезка картинок (увеличиваем нижний запас для многострочных сносок)
             for y_min, y_max in merged_y_intervals:
                 try:
                     safe_y_min = max(0, y_min - 10)
-                    safe_y_max = min(y_max + 25, page_height)
+                    safe_y_max = min(y_max + 80, page_height)  # Было +25, стало +70
 
                     crop_rect = fitz.Rect(0, safe_y_min, page_width, safe_y_max)
 
@@ -128,7 +128,7 @@ def parse_pdf_pro(pdf_path, start_page=1, end_page=1):
                 except Exception as e:
                     print(f"⚠️ Предупреждение при склеивании картинки: {e}")
 
-            # ЭТАП 4 — Собираем чистый текст с синхронизированными отступами
+            # 2. ЭТАП 4 — Собираем чистый текст (синхронизируем нижнюю границу)
             for item, _ in result.document.iterate_items():
                 if hasattr(item, "text") and item.text and getattr(item, "label", "") != "table":
                     if hasattr(item, "prov") and item.prov:
@@ -136,7 +136,8 @@ def parse_pdf_pro(pdf_path, start_page=1, end_page=1):
                         y_pos = page_height - bbox.t
 
                         inside_vision_zone = any(
-                            (y_min - 10) <= y_pos <= (y_max + 20) for y_min, y_max in merged_y_intervals
+                            (y_min - 10) <= y_pos <= (y_max + 75) for y_min, y_max in merged_y_intervals
+                            # Было +20, стало +65
                         )
 
                         if not inside_vision_zone:

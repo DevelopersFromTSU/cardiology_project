@@ -222,10 +222,25 @@ with tab_edit:
                         st.info("💡 **Human-in-the-Loop:** Точечный перепарс сложной страницы с помощью Gemini 3.7.")
                         current_page_num = extract_page_number(selected_file)
 
-                        use_prev_page = st.checkbox(
-                            f"📄 Прикрепить текст прошлой страницы (Стр. {current_page_num - 1}) для восстановления шапки",
-                            value=True
+                        # Формируем список доступных предыдущих страниц (до 3 штук назад)
+                        available_prev_pages = [
+                            p for p in [current_page_num - 1, current_page_num - 2, current_page_num - 3]
+                            if p >= 1
+                        ]
+
+                        # По умолчанию выбираем ровно 1 предыдущую страницу (если она существует)
+                        default_selected = [current_page_num - 1] if (
+                                                                                 current_page_num - 1) in available_prev_pages else []
+
+                        selected_prev_pages = st.multiselect(
+                            "📄 Выберите предыдущие страницы для восстановления контекста/шапки (до 3 страниц):",
+                            options=available_prev_pages,
+                            default=default_selected,
+                            format_func=lambda
+                                p: f"Страница {p} ({'непосредственно прошлая' if p == current_page_num - 1 else 'более ранний контекст'})",
+                            help="Если таблица началась 2-3 страницы назад, выберите их, чтобы LLM увидела заглавную шапку всей матрицы."
                         )
+
                         use_next_page = st.checkbox(
                             f"📄 Прикрепить текст следующей страницы (Стр. {current_page_num + 1})"
                         )
@@ -236,18 +251,19 @@ with tab_edit:
 
                         custom_instructions = st.text_area(
                             "✍️ Указания врачу-эксперту (опционально):",
-                            placeholder="Например: В черновике вместо 'Столбец 1' должен быть 'Варфарин'. Замени все абстрактные столбцы на названия препаратов из прошлой страницы."
+                            placeholder="Например: Таблица тянется со стр. 177. Восстанови 4 колонки препаратов (Бисопролол, Метопролол, Карведилол, Небиволол)."
                         )
 
                         if st.button("🚀 Сгенерировать новый вариант", type="primary", width="stretch"):
-                            with st.spinner("🧠 Gemini 3.7 Flash анализирует страницу с учетом контекста..."):
+                            with st.spinner(
+                                    "🧠 Gemini 3.7 Flash анализирует страницу с учетом расширенного контекста..."):
                                 try:
                                     pdf_path_full = DATA_DIR / f"{selected_book}.pdf"
                                     new_result = run_smart_reparse(
                                         book_path_pdf=pdf_path_full,
                                         book_name_str=selected_book,
                                         page_number=current_page_num,
-                                        use_prev=use_prev_page,
+                                        prev_pages=selected_prev_pages,
                                         use_next=use_next_page,
                                         use_draft=use_draft_text,
                                         current_draft=page_data.get("refined_text", ""),

@@ -30,8 +30,7 @@ def get_gemini_client():
     return genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
 
 
-def refine_medical_chunk(chunk_text, max_retries=3):
-    """Транскрибация, вычитка и контекстная нормализация текста."""
+def refine_medical_chunk(chunk_text):
     client = get_gemini_client()
     model_id = "gemini-3.5-flash-lite"
 
@@ -51,8 +50,12 @@ def refine_medical_chunk(chunk_text, max_retries=3):
         temperature=0.0,
     )
 
-    for attempt in range(max_retries):
+    max_retries = 20
+    attempt = 1
+
+    while attempt <= max_retries:
         try:
+            print(f"📝 [Refiner] Очистка текста (Модель: {model_id}, попытка {attempt}/{max_retries})...")
             response = client.models.generate_content(
                 model=model_id,
                 contents=f"Обработай следующий текст:\n\n{chunk_text}",
@@ -60,16 +63,18 @@ def refine_medical_chunk(chunk_text, max_retries=3):
             )
             return response.text.strip()
         except Exception as e:
-            print(f"⚠️ Ошибка Gemini при очистке текста (попытка {attempt + 1}/{max_retries}): {e}")
-            time.sleep(3)
+            print(f"⚠️ [Refiner] Ошибка API ({model_id}, попытка {attempt}): {e}")
+            if attempt == max_retries:
+                print(f"❌ [Refiner] Фатальная ошибка после {max_retries} попыток. Возвращаем исходный текст.")
+                return chunk_text
+            print("🔄 Повтор через 5 сек...")
+            time.sleep(5)
+            attempt += 1
 
-    return chunk_text
 
-
-def extract_page_metadata(full_page_text, previous_topic=None, max_retries=3):
-    """Генерация темы и тегов по ВСЕМУ итоговому тексту страницы (текст + таблицы + матрицы)."""
+def extract_page_metadata(full_page_text, previous_topic=None):
     client = get_gemini_client()
-    model_id = "gemini-3.5-flash-lite"
+    model_id = "gemini-3.7-flash"
 
     context_hint = ""
     if previous_topic:
@@ -78,9 +83,10 @@ def extract_page_metadata(full_page_text, previous_topic=None, max_retries=3):
     sys_instr = (
         "Ты — аналитик медицинских документов. Определи главную тему и теги для оцифрованной страницы клинического руководства.\n\n"
         "ПРАВИЛА ОПРЕДЕЛЕНИЯ ТЕМЫ (TOPIC):\n"
-        "1. Оценивай СМЫСЛОВОЙ ОБЪЕМ страницы: если 80% страницы занимает матрица/таблица (например, 'Шкала SCORE2-OP' или 'Стратификация риска'), темой ОБЯЗАНА быть эта шкала/таблица, даже если внизу есть короткие пояснения.\n"
-        "2. КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО делать темой слова 'Пояснения', 'Содержание (шаблон)', 'Ключ', 'Введение', 'Сноски'.\n"
-        "3. Тема должна быть краткой, емкой и содержать клиническую суть (например: 'Шкала SCORE2-OP: Оценка сердечно-сосудистого риска у пожилых').\n"
+        "1. ПРИОРИТЕТ ЗАГОЛОВКА: Если в тексте есть Markdown-заголовок (начинается с '### '), возьми его за основу темы. Запрещено выдумывать другие показания/диагнозы, если они не указаны в этом заголовке.\n"
+        "2. ПЕРЕЧИСЛЕНИЕ СУБЪЕКТОВ: Если на странице в блоках 'Условия: [Препарат: ...]' описывается несколько препаратов, ОБЯЗАТЕЛЬНО включи их названия в тему.\n"
+        "3. ЗАПРЕТ НА МУСОР: Категорически запрещено делать темой слова 'Пояснения', 'Содержание', 'Ключ', 'Введение', 'Сноски'.\n"
+        "4. ЗАПРЕТ НА ДОДУМЫВАНИЕ: Не придумывай абстрактные фразы, опирайся строго на видимый текст.\n"
         f"{context_hint}"
     )
 
@@ -91,8 +97,12 @@ def extract_page_metadata(full_page_text, previous_topic=None, max_retries=3):
         response_schema=PageMetadata,
     )
 
-    for attempt in range(max_retries):
+    max_retries = 20
+    attempt = 1
+
+    while attempt <= max_retries:
         try:
+            print(f"🏷️ [Metadata] Генерация темы и тегов (Модель: {model_id}, попытка {attempt}/{max_retries})...")
             response = client.models.generate_content(
                 model=model_id,
                 contents=f"Определи тему и теги для следующего текста страницы:\n\n{full_page_text[:4000]}",
@@ -100,7 +110,10 @@ def extract_page_metadata(full_page_text, previous_topic=None, max_retries=3):
             )
             return json.loads(response.text)
         except Exception as e:
-            print(f"⚠️ Ошибка генерации метаданных страницы (попытка {attempt + 1}/{max_retries}): {e}")
-            time.sleep(3)
-
-    return None
+            print(f"⚠️ [Metadata] Ошибка API ({model_id}, попытка {attempt}): {e}")
+            if attempt == max_retries:
+                print(f"❌ [Metadata] Фатальная ошибка после {max_retries} попыток.")
+                return None
+            print("🔄 Повтор через 5 сек...")
+            time.sleep(5)
+            attempt += 1

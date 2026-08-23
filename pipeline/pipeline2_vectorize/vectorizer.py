@@ -6,97 +6,107 @@ import uuid
 from dotenv import load_dotenv
 from qdrant_client import QdrantClient
 from qdrant_client import models
-from langchain_text_splitters import RecursiveCharacterTextSplitter, MarkdownHeaderTextSplitter
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 from FlagEmbedding import BGEM3FlagModel
 
 
-def clean_excessive_whitespace(text):
+def clean_excessive_whitespace(text: str) -> str:
     if not text:
         return ""
-    text = re.sub(r'\[\d+[\d\s,\-]*\]', '', text)
+    # Удалена регулярка, убивающая [1]
     text = re.sub(r'\n{3,}', '\n\n', text)
     text = re.sub(r'[ \t]+$', '', text, flags=re.MULTILINE)
     text = re.sub(r'(?<=\S)[ \t]{2,}', ' ', text)
     return text.strip()
 
 
-# --- НОВАЯ ФУНКЦИЯ АВТОМАТИЧЕСКОЙ СКЛЕЙКИ В ПАМЯТИ ---
-def merge_short_pages(page_files_data, min_chars=250):
+def get_global_chunks_with_pages(page_files_data: list, book_name: str, chunk_size: int = 1500, chunk_overlap: int = 250) -> list:
     """
-    Автоматически склеивает короткие страницы (хвосты списков, одиночные фразы)
-    с предыдущей полноценной страницей прямо в памяти перед векторизацией.
+    Собирает все страницы в единый поток книги, режет со сквозным нахлестом через границы страниц
+    и точно определяет все страницы, затронутые каждым чанком.
     """
-    if not page_files_data:
-        return []
+    full_text = ""
+    page_spans = []
 
-    merged_data = []
-    for page_num, text, topic, tags in page_files_data:
-        # Если чанк слишком короткий и уже есть куда приклеивать
-        if len(text.strip()) < min_chars and merged_data:
-            prev_page, prev_text, prev_topic, prev_tags = merged_data[-1]
-            print(f"📎 Автосклейка: страница {page_num} ({len(text)} симв.) прикреплена к странице {prev_page}")
-
-            # Дописываем текст к предыдущей странице
-            combined_text = f"{prev_text}\n\n{text}"
-            merged_data[-1] = (prev_page, combined_text, prev_topic, prev_tags)
-        else:
-            merged_data.append((page_num, text, topic, tags))
-
-    return merged_data
-
-
-def get_global_chunks_with_pages(page_files_data, book_name, chunk_size=1500, chunk_overlap=200):
-    # Учитываем всю иерархию заголовков, которую создает наш refiner.py
-    headers_to_split_on = [("#", "H1"), ("##", "H2"), ("###", "H3")]
-    markdown_splitter = MarkdownHeaderTextSplitter(headers_to_split_on=headers_to_split_on)
-
-    text_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=chunk_size,
-        chunk_overlap=chunk_overlap,
-        length_function=len
-    )
-
-    final_chunks = []
-
-    # Обрабатываем каждую страницу строго изолированно
+    # 1. Формируем непрерывную книгу и точную карту смещений символов
     for page_num, raw_text, topic, tags in page_files_data:
         cleaned = clean_excessive_whitespace(raw_text)
         if not cleaned:
             continue
 
-        # 1. Сначала бьем страницу по Markdown-заголовкам
-        md_splits = markdown_splitter.split_text(cleaned)
+        start_idx = len(full_text)
+        full_text += cleaned + "\n\n"
+        end_idx = len(full_text)
 
-        # 2. Затем аккуратно режем слишком длинные куски
-        doc_splits = text_splitter.split_documents(md_splits)
+        page_spans.append({
+            "start": start_idx,
+            "end": end_idx,
+            "page": page_num,
+            "topic": topic,
+            "tags": tags
+        })
 
-        for doc in doc_splits:
-            # 3. Добавляем метаданные в объект документа
-            doc.metadata.update({
-                "page": page_num,
-                "topic": topic,
-                "tags": tags,
-                "book": book_name
-            })
+    if not full_text:
+        return []
 
-            # 4. Вшиваем жесткий контекст прямо в начало текста чанка для эмбеддера
-            header_context = " > ".join([v for k, v in doc.metadata.items() if k.startswith("H")])
-            context_prefix = f"Трактат: {book_name} | Тема: {topic} | Теги: {tags}\n"
-            if header_context:
-                context_prefix += f"Раздел: {header_context}\n"
+    # 2. Единый сплиттер со сквозным нахлестом и сохранением заголовков Markdown
+    text_splitter = RecursiveCharacterTextSplitter(
+        chunk_size=chunk_size,
+        chunk_overlap=chunk_overlap,
+        length_function=len,
+        add_start_index=True,
+        separators=["\n### ", "\n## ", "\n# ", "\n\n", "\n", ". ", " "]
+    )
 
-            doc.page_content = f"{context_prefix}\n{doc.page_content}"
-            final_chunks.append(doc)
+    raw_chunks = text_splitter.create_documents([full_text])
+    final_chunks = []
+
+    # 3. Сопоставляем каждый чанк со всеми пересекаемыми страницами
+    for chunk in raw_chunks:
+        chunk_start = chunk.metadata.get("start_index", 0)
+        chunk_end = chunk_start + len(chunk.page_content)
+
+        overlapping_pages = []
+        chunk_topics = set()
+        chunk_tags = set()
+
+        for span in page_spans:
+            # Проверка пересечения отрезка чанка [chunk_start, chunk_end] с отрезком страницы [span.start, span.end]
+            if max(chunk_start, span["start"]) < min(chunk_end, span["end"]):
+                overlapping_pages.append(span["page"])
+                if span["topic"] and span["topic"] not in ["Не определена", "Медицинские данные"]:
+                    chunk_topics.add(span["topic"])
+                if span["tags"] and span["tags"] != "Нет тегов":
+                    chunk_tags.add(span["tags"])
+
+        primary_page = overlapping_pages[0] if overlapping_pages else 1
+        pages_str = ", ".join(map(str, overlapping_pages)) if overlapping_pages else str(primary_page)
+        topic_str = "; ".join(chunk_topics) if chunk_topics else "Кардиология"
+        tags_str = ", ".join(chunk_tags) if chunk_tags else "рекомендации"
+
+        # 4. Вшиваем контекстный префикс в тело текста чанка для эмбеддера
+        context_prefix = f"Трактат: {book_name} | Стр: {pages_str} | Тема: {topic_str}"
+        chunk.page_content = f"{context_prefix}\n\n{chunk.page_content}"
+
+        chunk.metadata = {
+            "page": primary_page,
+            "pages": overlapping_pages,
+            "book": book_name,
+            "topic": topic_str,
+            "tags": tags_str
+        }
+        final_chunks.append(chunk)
 
     return final_chunks
 
 
-def upload_chunks_to_qdrant(chunks, qdrant_client, embedding_model, collection_name, book_name):
-    print(f"🔄 Подготовка к загрузке {len(chunks)} чанков в Qdrant...")
+def upload_chunks_to_qdrant(chunks: list, qdrant_client: QdrantClient, embedding_model: BGEM3FlagModel, collection_name: str, book_name: str):
+    print(f"🔄 Подготовка к загрузке {len(chunks)} сквозных чанков в Qdrant...")
 
     for i, chunk in enumerate(chunks, 1):
         chunk_text = chunk.page_content
         page_num = chunk.metadata.get("page", 0)
+        pages_list = chunk.metadata.get("pages", [page_num])
         topic = chunk.metadata.get("topic", "")
         tags = chunk.metadata.get("tags", "")
 
@@ -110,20 +120,22 @@ def upload_chunks_to_qdrant(chunks, qdrant_client, embedding_model, collection_n
 
         stable_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"{collection_name}_{book_name}_chunk_{i}"))
 
-        # Добавили topic и tags в payload для мета-фильтрации
         point = models.PointStruct(
             id=stable_id,
             vector={"dense": dense_vec, "sparse": sparse_vec},
             payload={
                 "text": chunk_text,
                 "page": page_num,
+                "pages": pages_list,
                 "book": book_name,
                 "topic": topic,
                 "tags": tags
             }
         )
         qdrant_client.upsert(collection_name=collection_name, points=[point])
-        print(f"✅ Загружен чанк {i}/{len(chunks)} (Страница {page_num})")
+        print(f"✅ Загружен чанк {i}/{len(chunks)} (Стр. {pages_list})")
+
+
 if __name__ == "__main__":
     load_dotenv()
 
@@ -167,13 +179,10 @@ if __name__ == "__main__":
             page_num = int(page_match.group()) if page_match else 1
             raw_page_data.append((page_num, text, topic, tags))
 
-        # 1. Сортируем страницы по порядку
+        # Сортируем страницы по порядку
         raw_page_data.sort(key=lambda x: x[0])
 
-        # 2. [НОВАЯ СТРОКА]: Автоматически склеиваем короткие фрагменты в памяти
-        page_files_data = merge_short_pages(raw_page_data, min_chars=250)
-
-        # 3. Режем на чанки и векторизуем
-        all_chunks = get_global_chunks_with_pages(page_files_data, args.book)
+        # Сквозное разбиение с нахлестом через границы страниц
+        all_chunks = get_global_chunks_with_pages(raw_page_data, args.book, chunk_size=1500, chunk_overlap=250)
         upload_chunks_to_qdrant(all_chunks, qdrant, model, collection_name, args.book)
-        print("🎉 Векторизация и загрузка успешно завершены!")
+        print("🎉 Сквозная векторизация книги завершена!")
