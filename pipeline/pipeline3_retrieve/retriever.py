@@ -1,7 +1,6 @@
 import os
 import re
 import math
-import json
 import requests
 from pathlib import Path
 from dotenv import load_dotenv
@@ -10,118 +9,113 @@ from qdrant_client import models
 from sentence_transformers import CrossEncoder
 from FlagEmbedding import BGEM3FlagModel
 
+# 1. Поиск .env в корне проекта
 BASE_DIR = Path(__file__).resolve().parent
-env_path = BASE_DIR / "pipeline" / ".env"
+root_env = BASE_DIR.parent.parent / ".env"
+env_path = root_env if root_env.exists() else BASE_DIR / ".env"
 if not env_path.exists():
-    env_path = BASE_DIR / "pipeline" / ".env.txt"
+    env_path = BASE_DIR / ".env.txt"
 
 if env_path.exists():
-    # Открываем с кодировкой utf-8-sig, которая автоматически уничтожает невидимый BOM-символ Блокнота
     with open(env_path, "r", encoding="utf-8-sig") as f:
         for line in f:
             line = line.strip()
-            # Вырезаем артефакты вроде "", если они случайно скопировались в файл
-            line = re.sub(r"^\\s*", "", line)
+            line = re.sub(r"^\s*", "", line)
             if "=" in line and not line.startswith("#"):
                 key, val = line.split("=", 1)
                 key = key.strip()
-                val = val.strip().strip('"').strip("'")  # Очищаем кавычки вокруг значений
+                val = val.strip().strip('"').strip("'")
                 os.environ[key] = val
 
 print(f"📁 Файл окружения: '{env_path}' (Существует? {env_path.exists()})")
-print(f"🔑 Проверка памяти: FOLDER_ID='{os.getenv('YANDEX_FOLDER_ID')}' | API_KEY='{os.getenv('YANDEX_API_KEY')[:10] if os.getenv('YANDEX_API_KEY') else None}...'")
+print(f"🔑 Проверка памяти: GOOGLE_API_KEY='{os.getenv('GOOGLE_API_KEY')[:10] if os.getenv('GOOGLE_API_KEY') else None}...' | QDRANT='{os.getenv('QDRANT_URL')}'")
 
-qdrant = QdrantClient(url=os.getenv("QDRANT_URL", "http://localhost:6333"))
+qdrant = QdrantClient(url=os.getenv("QDRANT_URL", "http://127.0.0.1:6333"))
 COLLECTION_NAME = os.getenv("COLLECTION_NAME", "medical_docs")
 
-print("⏳ Загрузка мощной гибридной модели BGE-M3...")
-model = BGEM3FlagModel('BAAI/bge-m3', use_fp16=True)
+# 2. Ленивая инициализация тяжелых моделей
+_model = None
+_reranker = None
 
-print("⏳ Загрузка модели реранкера (Cross-Encoder)...")
-reranker = CrossEncoder('BAAI/bge-reranker-base')
-print("✅ Все модели готовы!")
+def get_models():
+    """Подгружает модели в память только по требованию и хранит их активными."""
+    global _model, _reranker
+    if _model is None:
+        print("⏳ [Lazy Load] Загрузка BGE-M3 в память...")
+        _model = BGEM3FlagModel('BAAI/bge-m3', use_fp16=True)
+    if _reranker is None:
+        print("⏳ [Lazy Load] Загрузка реранкера Cross-Encoder...")
+        _reranker = CrossEncoder('BAAI/bge-reranker-base')
+    return _model, _reranker
+
 
 def logit_to_percentage(score: float) -> float:
-    """
-    НОВАЯ ФУНКЦИЯ: Преобразует сырой логит реранкера в проценты от 0 до 100
-    через математическую функцию сигмоиды.
-    """
+    """Преобразует сырой логит реранкера в проценты от 0 до 100 через сигмоиду."""
     probability = 1 / (1 + math.exp(-score))
     return round(probability * 100, 2)
 
 
 def rewrite_patient_query(patient_text: str) -> str:
     """
-    Превращает разговорную речь пациента в строгий медицинский поисковый запрос
-    через YandexGPT API (Foundation Models).
+    Универсальный кардиологический оптимизатор поискового запроса.
+    Динамически выявляет ведущую патологию (АГ, ИБС/ОКС, Аритмии, ХСН, Липиды)
+    и формирует сбалансированную строку терминов: Диагностика + Протоколы лечения.
     """
-    url = "https://llm.api.cloud.yandex.net/foundationModels/v1/completion"
-
-    folder_id = os.getenv("YANDEX_FOLDER_ID")
-    api_key = os.getenv("YANDEX_API_KEY")
-
-    if not folder_id or not api_key:
-        print(
-            "⚠️ Учетные данные Yandex (YANDEX_FOLDER_ID или YANDEX_API_KEY) не найдены. Поиск пойдет по сырому запросу.")
+    api_key = os.getenv("GOOGLE_API_KEY")
+    if not api_key:
         return patient_text
 
-    # Для статических API-ключей в Яндекс.Облаке используется схема Api-Key, а не Bearer
-    headers = {
-        "Authorization": f"Api-Key {api_key}",
-        "x-folder-id": folder_id,
-        "Content-Type": "application/json"
-    }
+    model_name = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
+    headers = {"Content-Type": "application/json"}
 
-    sys_instr = (
-        "Ты — специализированный поисковый процессор (NER & Query Optimizer) для медицинской базы знаний RAG. "
-        "Твоя ЕДИНСТВЕННАЯ задача — преобразовать разговорный запрос или жалобу пациента в плотный поисковый вектор "
-        "из стандартизированных клинических терминов и тегов.\n\n"
-        "ЖЕСТКИЕ ПРАВИЛА ГЕНЕРАЦИИ:\n"
-        "1. ТЕЛЕГРАФНЫЙ СТИЛЬ (БЕЗ ВОДЫ): КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО писать связные предложения, вопросы ('какое должно быть', 'подскажите'), "
-        "глаголы действия или вводные конструкции. Исключи все бытовые стоп-слова. Выводи ТОЛЬКО ключевые клинические сущности через пробел.\n"
-        "2. СТАНДАРТИЗАЦИЯ И АББРЕВИАТУРЫ: Переводи любые разговорные симптомы и названия болезней в официальные медицинские термины, добавляя аббревиатуру в скобках. "
-        "Примеры: 'гипертония' -> 'артериальная гипертензия (АГ)', 'сахар' -> 'сахарный диабет (СД)'.\n"
-        "3. УНИВЕРСАЛЬНЫЕ КОЛИЧЕСТВЕННЫЕ ПОРОГИ: Если в запросе есть числовые показатели (возраст, АД, пульс), сохраняй точную цифру И формируй из нее логический порог "
-        "(например: 'возраст 82 года' -> 'возраст старше 80 лет >= 80 лет').\n"
-        "4. ФИКСАЦИЯ ЛЕКАРСТВ И ПРОЦЕДУР (КРИТИЧЕСКИ ВАЖНО): Если пациент упоминает конкретные препараты, классы лекарств (например: диуретики, статины, таблетки от давления) "
-        "или высказывает страхи по их поводу — ОБЯЗАТЕЛЬНО сохраняй их названия в запросе. Добавляй к ним теги: 'противопоказания побочные эффекты использовать с осторожностью'.\n"
-        "5. РАСШИРЕННЫЙ КЛИНИЧЕСКИЙ ИНТЕНТ (ДИАГНОЗ + ЛЕЧЕНИЕ): Чтобы база нашла не только нормы, но и что делать, всегда добавляй двойной набор тегов:\n"
-        "   - Для оценки ситуации: 'целевые значения целевой уровень классификация риск SCORE2'.\n"
-        "   - Для действий врача: 'лечение стратегия лекарственной терапии алгоритм стартовая терапия шаг 1 шаг 2'.\n"
-        "6. ФОРМАТ ВЫДАЧИ: Выводи ТОЛЬКО итоговую строку тегов без кавычек, точек и пояснений."
+    SYSTEM_REWRITE_INSTRUCTION = (
+        "Ты — ведущий эксперт-кардиоинформатик и поисковый оптимизатор по Клиническим рекомендациям Минздрава РФ и РКО.\n"
+        "Твоя задача — проанализировать анамнез пациента и сформировать единую поисковую строку ключевых терминов, "
+        "объединяющую ДИАГНОСТИКУ и ЛЕЧЕНИЕ строго под выявленные у пациента синдромы.\n\n"
+        "АЛГОРИТМ ФОРМИРОВАНИЯ ЗАПРОСА:\n"
+        "1. Определи ведущие синдромы пациента из областей: Артериальная гипертензия, ИБС/Стенокардия/ОКС, "
+        "Нарушения ритма/проводимости (ФП, тахикардии, брадикардии), Сердечная недостаточность (ХСН), Дислипидемия.\n"
+        "2. Включи диагностические термины: нозология, стадия/степень, критерии риска (SCORE2, CHA2DS2-VASc), синдромы.\n"
+        "3. ОБЯЗАТЕЛЬНО включи термины клинического лечения под выявленные синдромы:\n"
+        "   - при гипертензии: целевое АД, алгоритм стартовой терапии, иРААС, БКК, диуретики, немедикаментозные меры;\n"
+        "   - при ИБС/ОКС: антиангинальная терапия, двойная антитромбоцитарная терапия (АСК, клопидогрел, тикагрелор), реваскуляризация (ЧКВ);\n"
+        "   - при аритмиях/ФП: контроль ритма, контроль ЧСС, антикоагулянтная терапия (ПОАК), катетерная аблация, ЭКС;\n"
+        "   - при ХСН: квадротерапия ХСН (валсартан сакубитрил, иНГЛТ-2, спиронолактон), петлевые диуретики, целевой диурез;\n"
+        "   - при нарушении липидов: целевой уровень ХС ЛНП, статины высокой интенсивности, эзетимиб.\n\n"
+        "КРИТИЧЕСКОЕ ТРЕБОВАНИЕ: Выведи ИСКЛЮЧИТЕЛЬНО строку из 12-20 медицинских ключевых слов через пробел. "
+        "Без знаков препинания, без кавычек, без вводных слов."
     )
 
     payload = {
-        "modelUri": f"gpt://{folder_id}/yandexgpt/latest",
-        "completionOptions": {
-            "stream": False,
-            "temperature": 0.1,
-            "maxTokens": "300"
+        "system_instruction": {
+            "parts": [{"text": SYSTEM_REWRITE_INSTRUCTION}]
         },
-        "messages": [
-            {"role": "system", "text": sys_instr},
-            {"role": "user", "text": patient_text}
-        ]
+        "contents": [{"role": "user", "parts": [{"text": patient_text}]}],
+        "generationConfig": {"temperature": 0.1}
     }
 
     try:
-        response = requests.post(url, headers=headers, json=payload, timeout=10)
-        response.raise_for_status()
-
-        # В структуре ответа Yandex Cloud ML текст лежит в result -> alternatives -> message -> text
-        response_data = response.json()
-        refined_query = response_data['result']['alternatives'][0]['message']['text'].strip()
-        return refined_query
-
+        res = requests.post(url, headers=headers, json=payload, timeout=30)
+        res.raise_for_status()
+        return res.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
     except Exception as e:
-        print(f"⚠️ Ошибка перефразирования через YandexGPT: {e}")
-        # В случае сбоя возвращаем оригинальный текст, чтобы конвейер не падал
+        print(f"⚠️ Ошибка перефразирования: {e}")
+        return patient_text
+
+    try:
+        res = requests.post(url, headers=headers, json=payload, timeout=30)
+        res.raise_for_status()
+        return res.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+    except Exception as e:
+        print(f"⚠️ Ошибка перефразирования: {e}")
         return patient_text
 
 
-def hybrid_search(search_query: str, top_k: int = 5):
-    # Генерируем оба вектора для поискового запроса
-    outputs = model.encode([search_query], return_dense=True, return_sparse=True)
+def hybrid_search(search_query: str, top_k: int = 8, expand_top_neighbors: int = 3):
+    embed_model, rerank_model = get_models()
+
+    outputs = embed_model.encode([search_query], return_dense=True, return_sparse=True)
     dense_query = outputs['dense_vecs'][0].tolist()
     sparse_dict = outputs['lexical_weights'][0]
 
@@ -130,46 +124,77 @@ def hybrid_search(search_query: str, top_k: int = 5):
         values=[float(v) for v in sparse_dict.values()]
     )
 
-    # Делаем один нативный гибридный запрос через prefetch и RRF (Reciprocal Rank Fusion)
+    # 1. Извлекаем 50 кандидатов через RRF
     response = qdrant.query_points(
         collection_name=COLLECTION_NAME,
         prefetch=[
-            models.Prefetch(query=dense_query, using="dense", limit=40),
-            models.Prefetch(query=sparse_query, using="sparse", limit=40)
+            models.Prefetch(query=dense_query, using="dense", limit=50),
+            models.Prefetch(query=sparse_query, using="sparse", limit=50)
         ],
         query=models.RrfQuery(rrf=models.Rrf()),
-        limit=top_k * 3,  # Берем с запасом для последующего реранкера
+        limit=30,
         with_payload=True
     )
 
     candidate_list = response.points
+    if not candidate_list:
+        return []
 
-    # Реранжирование результатов
-    if candidate_list:
-        pairs = [[search_query, hit.payload.get('text', '')] for hit in candidate_list]
-        rerank_scores = reranker.predict(pairs)
-        scored_candidates = sorted(zip(candidate_list, rerank_scores), key=lambda x: x[1], reverse=True)
-        final_points = scored_candidates[:top_k]
-    else:
-        final_points = []
+    # 2. Переранжирование через Cross-Encoder
+    pairs = [[search_query, hit.payload.get('text', '')] for hit in candidate_list]
+    rerank_scores = rerank_model.predict(pairs)
+    scored_candidates = sorted(zip(candidate_list, rerank_scores), key=lambda x: x[1], reverse=True)
 
-    print(f"\nВыдача результатов (Возвращено: {len(final_points)})\n" + "=" * 50)
-    retrieved_texts = []
-    for i, (hit, score) in enumerate(final_points, 1):
-        text = hit.payload.get('text', '')
-        page = hit.payload.get('page', 'Неизвестно')
-        percentage_score = logit_to_percentage(score)
+    # Берем топ-8 лучших чанков
+    top_candidates = scored_candidates[:top_k]
 
-        # Вывод в консоль для отладки можно оставить
-        print(f"[⭐ Точность: {percentage_score}% | Страница: {page}] -> {text}")
+    # 3. Подтягивание соседних чанков (Context Window Expansion) для топ-3 лидеров
+    expanded_chunks = []
+    seen_indices = set()
 
-        # [НОВОЕ]: Реальное добавление данных в массив
-        retrieved_texts.append({
-            "text": text,
-            "page": page,
-            "score": percentage_score
-        })
+    for idx, (hit, score) in enumerate(top_candidates):
+        payload = hit.payload
+        book = payload.get("book")
+        c_idx = payload.get("chunk_index")
 
-    return retrieved_texts
+        # Для лидеров (топ-3) ищем соседей в той же книге через фильтр Qdrant
+        if idx < expand_top_neighbors and c_idx is not None and book:
+            neighbor_points, _ = qdrant.scroll(
+                collection_name=COLLECTION_NAME,
+                scroll_filter=models.Filter(
+                    must=[
+                        models.FieldCondition(key="book", match=models.MatchValue(value=book)),
+                        models.FieldCondition(
+                            key="chunk_index",
+                            range=models.Range(gte=max(1, c_idx - 1), lte=c_idx + 1)
+                        )
+                    ]
+                ),
+                limit=3,
+                with_payload=True
+            )
+            # Сортируем соседние чанки по порядку чтения
+            neighbor_points.sort(key=lambda p: p.payload.get("chunk_index", 0))
 
-# формула сигмоиды для обозначения итоговых цифр точности в диапазоне от 0 до 100 процентов
+            merged_text = "\n\n".join(
+                [p.payload.get("text", "") for p in neighbor_points if p.payload.get("chunk_index") not in seen_indices]
+            )
+            for p in neighbor_points:
+                seen_indices.add(p.payload.get("chunk_index"))
+
+            if merged_text:
+                expanded_chunks.append({
+                    "text": merged_text,
+                    "page": payload.get("page", "Неизвестно"),
+                    "score": logit_to_percentage(score)
+                })
+        else:
+            if c_idx not in seen_indices:
+                seen_indices.add(c_idx)
+                expanded_chunks.append({
+                    "text": payload.get("text", ""),
+                    "page": payload.get("page", "Неизвестно"),
+                    "score": logit_to_percentage(score)
+                })
+
+    return expanded_chunks

@@ -129,7 +129,8 @@ def upload_chunks_to_qdrant(chunks: list, qdrant_client: QdrantClient, embedding
                 "pages": pages_list,
                 "book": book_name,
                 "topic": topic,
-                "tags": tags
+                "tags": tags,
+                "chunk_index": i  # Порядковый номер чанка в книге
             }
         )
         qdrant_client.upsert(collection_name=collection_name, points=[point])
