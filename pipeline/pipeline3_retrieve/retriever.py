@@ -8,6 +8,7 @@ from qdrant_client import QdrantClient
 from qdrant_client import models
 from sentence_transformers import CrossEncoder
 from FlagEmbedding import BGEM3FlagModel
+import time
 
 # 1. Поиск .env в корне проекта
 BASE_DIR = Path(__file__).resolve().parent
@@ -28,14 +29,14 @@ if env_path.exists():
                 os.environ[key] = val
 
 print(f"📁 Файл окружения: '{env_path}' (Существует? {env_path.exists()})")
-print(f"🔑 Проверка памяти: GOOGLE_API_KEY='{os.getenv('GOOGLE_API_KEY')[:10] if os.getenv('GOOGLE_API_KEY') else None}...' | QDRANT='{os.getenv('QDRANT_URL')}'")
 
 qdrant = QdrantClient(url=os.getenv("QDRANT_URL", "http://127.0.0.1:6333"))
 COLLECTION_NAME = os.getenv("COLLECTION_NAME", "medical_docs")
 
-# 2. Ленивая инициализация тяжелых моделей
+# 2. Ленивая инициализация моделей
 _model = None
 _reranker = None
+
 
 def get_models():
     """Подгружает модели в память только по требованию и хранит их активными."""
@@ -55,64 +56,89 @@ def logit_to_percentage(score: float) -> float:
     return round(probability * 100, 2)
 
 
-def rewrite_patient_query(patient_text: str) -> str:
-    """
-    Универсальный кардиологический оптимизатор поискового запроса.
-    Динамически выявляет ведущую патологию (АГ, ИБС/ОКС, Аритмии, ХСН, Липиды)
-    и формирует сбалансированную строку терминов: Диагностика + Протоколы лечения.
-    """
+def rewrite_patient_query(patient_text: str, max_retries: int = 20) -> str:
     api_key = os.getenv("GOOGLE_API_KEY")
     if not api_key:
-        return patient_text
+        raise ValueError("Критическая ошибка: Не задан GOOGLE_API_KEY в окружении.")
 
+    # Используем актуальную рабочую модель (gemini-2.5-flash или gemini-1.5-flash)
     model_name = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
     headers = {"Content-Type": "application/json"}
 
-    SYSTEM_REWRITE_INSTRUCTION = (
-        "Ты — ведущий эксперт-кардиоинформатик и поисковый оптимизатор по Клиническим рекомендациям Минздрава РФ и РКО.\n"
-        "Твоя задача — проанализировать анамнез пациента и сформировать единую поисковую строку ключевых терминов, "
-        "объединяющую ДИАГНОСТИКУ и ЛЕЧЕНИЕ строго под выявленные у пациента синдромы.\n\n"
-        "АЛГОРИТМ ФОРМИРОВАНИЯ ЗАПРОСА:\n"
-        "1. Определи ведущие синдромы пациента из областей: Артериальная гипертензия, ИБС/Стенокардия/ОКС, "
-        "Нарушения ритма/проводимости (ФП, тахикардии, брадикардии), Сердечная недостаточность (ХСН), Дислипидемия.\n"
-        "2. Включи диагностические термины: нозология, стадия/степень, критерии риска (SCORE2, CHA2DS2-VASc), синдромы.\n"
-        "3. ОБЯЗАТЕЛЬНО включи термины клинического лечения под выявленные синдромы:\n"
-        "   - при гипертензии: целевое АД, алгоритм стартовой терапии, иРААС, БКК, диуретики, немедикаментозные меры;\n"
-        "   - при ИБС/ОКС: антиангинальная терапия, двойная антитромбоцитарная терапия (АСК, клопидогрел, тикагрелор), реваскуляризация (ЧКВ);\n"
-        "   - при аритмиях/ФП: контроль ритма, контроль ЧСС, антикоагулянтная терапия (ПОАК), катетерная аблация, ЭКС;\n"
-        "   - при ХСН: квадротерапия ХСН (валсартан сакубитрил, иНГЛТ-2, спиронолактон), петлевые диуретики, целевой диурез;\n"
-        "   - при нарушении липидов: целевой уровень ХС ЛНП, статины высокой интенсивности, эзетимиб.\n\n"
-        "КРИТИЧЕСКОЕ ТРЕБОВАНИЕ: Выведи ИСКЛЮЧИТЕЛЬНО строку из 12-20 медицинских ключевых слов через пробел. "
-        "Без знаков препинания, без кавычек, без вводных слов."
-    )
+    SYSTEM_REWRITE_INSTRUCTION = """
+    Ты — ведущий медицинский информатик кардиологических клинических рекомендаций.
+    Твоя задача — трансформировать анамнез пациента в сверхточный поисковый вектор из 18–25 ключевых слов и медицинских терминов.
+
+    ПРАВИЛА ПОСТРОЕНИЯ ЗАПРОСА:
+    1. ОБЯЗАТЕЛЬНО ВКЛЮЧАЙ ЧИСЛА И ПОКАЗАТЕЛИ:
+       - Переноси точные пиковые и пограничные значения: например, "158 120 130", "ЧСС 42", "ЧСС 170", "ФВ 35".
+       - Указывай демографический маркер ("пожилые" или конкретный возраст), если это указано в анамнезе.
+
+    2. ПЕРЕВОДИ ЖАЛОБЫ В КЛИНИЧЕСКИЕ СИНДРОМЫ:
+       - Повышение АД / кризы -> "артериальная гипертензия 3 степень диастолическая криз органы-мишени"
+       - Загрудинная боль / дискомфорт -> "ишемическая болезнь сердца стенокардия напряжения острый коронарный синдром ишемия"
+       - Сердцебиение / приступы / перебои -> "пароксизмальная тахикардия фибрилляция предсердий наджелудочковая антиаритмическая"
+       - Редкий пульс / обмороки / паузы -> "брадиаритмия синдром слабости синусового узла атриовентрикулярная блокада кардиостимуляция"
+       - Одышка / застой / отеки -> "хроническая сердечная недостаточность застой фракция выброса квадротерапия петлевые диуретики"
+       - Высокий холестерин / атеросклероз -> "дислипидемия гиперхолестеринемия холестерин ЛНП атеросклероз"
+
+    3. ПОДБИРАЙ КЛАССЫ ПРЕПАРАТОВ И ШКАЛЫ СТРОГО ПОД ВЕДУЩИЙ СИНДРОМ:
+       - Для АГ: иРААС антагонисты кальция диуретики SCORE2
+       - Для ИБС / ОКС: антиагреганты статины нитраты бета-блокаторы реваскуляризация GRACE
+       - Для тахиаритмий / ФП: антиаритмические пульсурежающие антикоагулянты CHA2DS2-VASc
+       - Для брадиаритмий: атропин электрокардиостимуляция пейсмейкер
+       - Для ХСН: АРНИ иАПФ бета-блокаторы антагонисты альдостерона иНГЛТ-2 диуретики
+       - Для дислипидемий: статины эзетимиб ингибиторы PCSK9
+
+    4. СТРОГИЙ ЗАПРЕТ НА АДМИНИСТРАТИВНЫЕ СЛОВА:
+       - Категорически ЗАПРЕЩЕНО писать общие слова: "клинические", "рекомендации", "диагностика", "алгоритм", "критерии", "первая линия", "тактика", "РКО", "Минздрав", "пациент". Они засоряют поиск оглавлениями и титульными листами!
+
+    ФОРМАТ ВЫВОДА:
+    Строго от 18 до 25 профильных терминов, групп препаратов и чисел в одну строку через пробел.
+    """
 
     payload = {
-        "system_instruction": {
-            "parts": [{"text": SYSTEM_REWRITE_INSTRUCTION}]
-        },
+        "system_instruction": {"parts": [{"text": SYSTEM_REWRITE_INSTRUCTION}]},
         "contents": [{"role": "user", "parts": [{"text": patient_text}]}],
         "generationConfig": {"temperature": 0.1}
     }
 
-    try:
-        res = requests.post(url, headers=headers, json=payload, timeout=30)
-        res.raise_for_status()
-        return res.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
-    except Exception as e:
-        print(f"⚠️ Ошибка перефразирования: {e}")
-        return patient_text
+    attempt = 1
+    while attempt <= max_retries:
+        try:
+            print(f"🔄 [Rewriter] Попытка генерации поискового запроса ({attempt}/{max_retries})...")
+            res = requests.post(url, headers=headers, json=payload, timeout=30)
 
-    try:
-        res = requests.post(url, headers=headers, json=payload, timeout=30)
-        res.raise_for_status()
-        return res.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
-    except Exception as e:
-        print(f"⚠️ Ошибка перефразирования: {e}")
-        return patient_text
+            # Если вернулась ошибка со стороны API (429 лимит, 503 сбой сервера, 404 и т.д.)
+            if res.status_code != 200:
+                print(f"⚠️ [Rewriter] Сервер API вернул статус {res.status_code}: {res.text}")
+                time.sleep(5)
+                attempt += 1
+                continue
+
+            data = res.json()
+            candidates = data.get("candidates", [])
+            if candidates and "content" in candidates[0]:
+                parts = candidates[0]["content"].get("parts", [])
+                if parts and "text" in parts[0]:
+                    rewritten = parts[0]["text"].strip()
+                    clean_query = " ".join(rewritten.split())
+                    print(f"✅ [Rewriter] Поисковый запрос успешно сформирован: {clean_query}")
+                    return clean_query
+
+        except requests.exceptions.RequestException as e:
+            # Перехват только сетевых таймаутов/разрывов сокета для ухода на повтор, БЕЗ возврата заглушек
+            print(f"⚠️ [Rewriter] Ошибка сети при обращении к LLM (попытка {attempt}): {e}")
+
+        time.sleep(5)
+        attempt += 1
+
+    # Если после всех попыток ответа нет — прерываем выполнение явной ошибкой, а не мусорной строкой
+    raise RuntimeError(f"❌ Фатальный сбой: нейросеть не ответила после {max_retries} попыток.")
 
 
-def hybrid_search(search_query: str, top_k: int = 8, expand_top_neighbors: int = 3):
+def hybrid_search(search_query: str, top_k: int = 10, expand_top_neighbors: int = 3):
     embed_model, rerank_model = get_models()
 
     outputs = embed_model.encode([search_query], return_dense=True, return_sparse=True)
@@ -124,15 +150,15 @@ def hybrid_search(search_query: str, top_k: int = 8, expand_top_neighbors: int =
         values=[float(v) for v in sparse_dict.values()]
     )
 
-    # 1. Извлекаем 50 кандидатов через RRF
+    # 1. Запрос 40 кандидатов в Qdrant
     response = qdrant.query_points(
         collection_name=COLLECTION_NAME,
         prefetch=[
-            models.Prefetch(query=dense_query, using="dense", limit=50),
-            models.Prefetch(query=sparse_query, using="sparse", limit=50)
+            models.Prefetch(query=dense_query, using="dense", limit=80),
+            models.Prefetch(query=sparse_query, using="sparse", limit=80)
         ],
         query=models.RrfQuery(rrf=models.Rrf()),
-        limit=30,
+        limit=80,
         with_payload=True
     )
 
@@ -140,25 +166,36 @@ def hybrid_search(search_query: str, top_k: int = 8, expand_top_neighbors: int =
     if not candidate_list:
         return []
 
-    # 2. Переранжирование через Cross-Encoder
+    # 2. Ранжирование Cross-Encoder
     pairs = [[search_query, hit.payload.get('text', '')] for hit in candidate_list]
     rerank_scores = rerank_model.predict(pairs)
     scored_candidates = sorted(zip(candidate_list, rerank_scores), key=lambda x: x[1], reverse=True)
 
-    # Берем топ-8 лучших чанков
-    top_candidates = scored_candidates[:top_k]
+    # 3. Фильтрация дублей страниц + безопасная склейка контекста
+    retrieved_texts = []
+    page_counts = {}
+    seen_chunk_keys = set()
 
-    # 3. Подтягивание соседних чанков (Context Window Expansion) для топ-3 лидеров
-    expanded_chunks = []
-    seen_indices = set()
-
-    for idx, (hit, score) in enumerate(top_candidates):
+    for hit, score in scored_candidates:
         payload = hit.payload
-        book = payload.get("book")
-        c_idx = payload.get("chunk_index")
+        page = payload.get('page', 'Неизвестно')
+        book = payload.get('book', 'unknown_book')
+        c_idx = payload.get('chunk_index')
+        point_id = hit.id
 
-        # Для лидеров (топ-3) ищем соседей в той же книге через фильтр Qdrant
-        if idx < expand_top_neighbors and c_idx is not None and book:
+        # Уникальный ключ страницы в рамках конкретной книги
+        page_key = f"{book}_{page}"
+
+        # Пропускаем, если с этой страницы уже взяли 2 чанка
+        if page_counts.get(page_key, 0) >= 2:
+            continue
+
+        # Для топ-3 лидеров подтягиваем соседей (если есть chunk_index)
+        if len(retrieved_texts) < expand_top_neighbors and c_idx is not None and book != "unknown_book":
+            chunk_key = (book, c_idx)
+            if chunk_key in seen_chunk_keys:
+                continue
+
             neighbor_points, _ = qdrant.scroll(
                 collection_name=COLLECTION_NAME,
                 scroll_filter=models.Filter(
@@ -173,28 +210,44 @@ def hybrid_search(search_query: str, top_k: int = 8, expand_top_neighbors: int =
                 limit=3,
                 with_payload=True
             )
-            # Сортируем соседние чанки по порядку чтения
+
             neighbor_points.sort(key=lambda p: p.payload.get("chunk_index", 0))
 
-            merged_text = "\n\n".join(
-                [p.payload.get("text", "") for p in neighbor_points if p.payload.get("chunk_index") not in seen_indices]
-            )
+            texts = []
+            pages_set = set()
             for p in neighbor_points:
-                seen_indices.add(p.payload.get("chunk_index"))
+                n_c_idx = p.payload.get("chunk_index")
+                seen_chunk_keys.add((book, n_c_idx))
+                texts.append(p.payload.get("text", ""))
+                pg = p.payload.get("page")
+                if pg:
+                    pages_set.add(str(pg))
 
-            if merged_text:
-                expanded_chunks.append({
-                    "text": merged_text,
-                    "page": payload.get("page", "Неизвестно"),
-                    "score": logit_to_percentage(score)
-                })
+            merged_text = "\n\n".join(texts).strip()
+            pages_str = ", ".join(sorted(pages_set, key=lambda x: int(x) if x.isdigit() else 0)) if pages_set else str(
+                page)
+
+            page_counts[page_key] = page_counts.get(page_key, 0) + 1
+            retrieved_texts.append({
+                "text": merged_text or payload.get("text", ""),
+                "page": pages_str,
+                "score": logit_to_percentage(score)
+            })
+
         else:
-            if c_idx not in seen_indices:
-                seen_indices.add(c_idx)
-                expanded_chunks.append({
+            # Добавление одиночного чанка (для позиций от 4-й и далее или базы без индекса)
+            unique_key = (book, c_idx) if c_idx is not None else point_id
+            if unique_key not in seen_chunk_keys:
+                seen_chunk_keys.add(unique_key)
+                page_counts[page_key] = page_counts.get(page_key, 0) + 1
+                retrieved_texts.append({
                     "text": payload.get("text", ""),
-                    "page": payload.get("page", "Неизвестно"),
+                    "page": str(page),
                     "score": logit_to_percentage(score)
                 })
 
-    return expanded_chunks
+        # Прерываем цикл строго при достижении необходимого top_k
+        if len(retrieved_texts) >= top_k:
+            break
+
+    return retrieved_texts

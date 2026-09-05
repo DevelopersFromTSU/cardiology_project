@@ -1,8 +1,16 @@
+import sys
 import os
 import json
 import argparse
 import re
 import uuid
+
+# ПРИНУДИТЕЛЬНАЯ ЗАЩИТА ВЫВОДА В WINDOWS (UTF-8)
+if sys.stdout and hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if sys.stderr and hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 from dotenv import load_dotenv
 from qdrant_client import QdrantClient
 from qdrant_client import models
@@ -13,7 +21,6 @@ from FlagEmbedding import BGEM3FlagModel
 def clean_excessive_whitespace(text: str) -> str:
     if not text:
         return ""
-    # Удалена регулярка, убивающая [1]
     text = re.sub(r'\n{3,}', '\n\n', text)
     text = re.sub(r'[ \t]+$', '', text, flags=re.MULTILINE)
     text = re.sub(r'(?<=\S)[ \t]{2,}', ' ', text)
@@ -21,14 +28,9 @@ def clean_excessive_whitespace(text: str) -> str:
 
 
 def get_global_chunks_with_pages(page_files_data: list, book_name: str, chunk_size: int = 1500, chunk_overlap: int = 250) -> list:
-    """
-    Собирает все страницы в единый поток книги, режет со сквозным нахлестом через границы страниц
-    и точно определяет все страницы, затронутые каждым чанком.
-    """
     full_text = ""
     page_spans = []
 
-    # 1. Формируем непрерывную книгу и точную карту смещений символов
     for page_num, raw_text, topic, tags in page_files_data:
         cleaned = clean_excessive_whitespace(raw_text)
         if not cleaned:
@@ -49,7 +51,6 @@ def get_global_chunks_with_pages(page_files_data: list, book_name: str, chunk_si
     if not full_text:
         return []
 
-    # 2. Единый сплиттер со сквозным нахлестом и сохранением заголовков Markdown
     text_splitter = RecursiveCharacterTextSplitter(
         chunk_size=chunk_size,
         chunk_overlap=chunk_overlap,
@@ -61,7 +62,6 @@ def get_global_chunks_with_pages(page_files_data: list, book_name: str, chunk_si
     raw_chunks = text_splitter.create_documents([full_text])
     final_chunks = []
 
-    # 3. Сопоставляем каждый чанк со всеми пересекаемыми страницами
     for chunk in raw_chunks:
         chunk_start = chunk.metadata.get("start_index", 0)
         chunk_end = chunk_start + len(chunk.page_content)
@@ -71,7 +71,6 @@ def get_global_chunks_with_pages(page_files_data: list, book_name: str, chunk_si
         chunk_tags = set()
 
         for span in page_spans:
-            # Проверка пересечения отрезка чанка [chunk_start, chunk_end] с отрезком страницы [span.start, span.end]
             if max(chunk_start, span["start"]) < min(chunk_end, span["end"]):
                 overlapping_pages.append(span["page"])
                 if span["topic"] and span["topic"] not in ["Не определена", "Медицинские данные"]:
@@ -84,7 +83,6 @@ def get_global_chunks_with_pages(page_files_data: list, book_name: str, chunk_si
         topic_str = "; ".join(chunk_topics) if chunk_topics else "Кардиология"
         tags_str = ", ".join(chunk_tags) if chunk_tags else "рекомендации"
 
-        # 4. Вшиваем контекстный префикс в тело текста чанка для эмбеддера
         context_prefix = f"Трактат: {book_name} | Стр: {pages_str} | Тема: {topic_str}"
         chunk.page_content = f"{context_prefix}\n\n{chunk.page_content}"
 
@@ -101,7 +99,7 @@ def get_global_chunks_with_pages(page_files_data: list, book_name: str, chunk_si
 
 
 def upload_chunks_to_qdrant(chunks: list, qdrant_client: QdrantClient, embedding_model: BGEM3FlagModel, collection_name: str, book_name: str):
-    print(f"🔄 Подготовка к загрузке {len(chunks)} сквозных чанков в Qdrant...")
+    print(f"[INFO] Подготовка к загрузке {len(chunks)} сквозных чанков в Qdrant...")
 
     for i, chunk in enumerate(chunks, 1):
         chunk_text = chunk.page_content
@@ -130,11 +128,11 @@ def upload_chunks_to_qdrant(chunks: list, qdrant_client: QdrantClient, embedding
                 "book": book_name,
                 "topic": topic,
                 "tags": tags,
-                "chunk_index": i  # Порядковый номер чанка в книге
+                "chunk_index": i  # Обязательный индекс для сборки соседей в retriever
             }
         )
         qdrant_client.upsert(collection_name=collection_name, points=[point])
-        print(f"✅ Загружен чанк {i}/{len(chunks)} (Стр. {pages_list})")
+        print(f"[OK] Загружен чанк {i}/{len(chunks)} (Стр. {pages_list})")
 
 
 if __name__ == "__main__":
@@ -150,7 +148,7 @@ if __name__ == "__main__":
 
     qdrant = QdrantClient(url=os.getenv("QDRANT_URL", "http://localhost:6333"))
 
-    print("⏳ Загрузка модели BGE-M3...")
+    print("[INFO] Загрузка модели BGE-M3...")
     model = BGEM3FlagModel('BAAI/bge-m3', use_fp16=True)
 
     if not qdrant.collection_exists(collection_name):
@@ -180,10 +178,8 @@ if __name__ == "__main__":
             page_num = int(page_match.group()) if page_match else 1
             raw_page_data.append((page_num, text, topic, tags))
 
-        # Сортируем страницы по порядку
         raw_page_data.sort(key=lambda x: x[0])
 
-        # Сквозное разбиение с нахлестом через границы страниц
         all_chunks = get_global_chunks_with_pages(raw_page_data, args.book, chunk_size=1500, chunk_overlap=250)
         upload_chunks_to_qdrant(all_chunks, qdrant, model, collection_name, args.book)
-        print("🎉 Сквозная векторизация книги завершена!")
+        print("[DONE] Сквозная векторизация книги завершена!")
