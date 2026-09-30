@@ -37,7 +37,7 @@ def call_gemini(messages_history, system_prompt, temperature=0.2):
     if not api_key:
         return "⚠️ Ошибка: Не задан GOOGLE_API_KEY в .env"
 
-    model_name = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
+    model_name = os.getenv("GEMINI_MODEL", "gemini-3.7-flash")
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
     headers = {"Content-Type": "application/json"}
 
@@ -526,7 +526,7 @@ elif st.session_state.stage == "analysis":
     with st.spinner("🔍 Поиск по клиническим рекомендациям в Qdrant..."):
         search_query = rewrite_patient_query(facts)
         try:
-            retrieved_chunks = hybrid_search(search_query=search_query, top_k=20)
+            retrieved_chunks = hybrid_search(search_query=search_query, top_k=30)
         except Exception:
             retrieved_chunks = []
 
@@ -584,7 +584,7 @@ elif st.session_state.stage == "analysis":
         ### 2. 🩺 КЛИНИЧЕСКАЯ ГИПОТЕЗА И ТАКТИКА (RAG-КОНСИЛИУМ)
         Сформулируй ключевые клинические тезисы под доминирующий синдром пациента.
         - Для пункта 1 (диагноз) ссылки на литературу не требуются (вывод по фактам пациента).
-        - Для пунктов 2, 3 и 4 опора на RAG строго обязательна.
+        - Для пунктов 2 (уровень риска), 3 (план лечения) и 4 (ограничения) опора на RAG строго обязательна.
 
         ПРАВИЛА ДОКАЗАТЕЛЬНОЙ БАЗЫ И ФОРМАТИРОВАНИЯ:
         1. ОБОСНОВАНИЕ ТЕЗИСА: Обосновывай каждый тезис опорой на RAG-контекст. Если возможно — используй точную цитату. Если информация в RAG представлена в виде таблицы, сложного алгоритма или фрагментов текста, сделай точный смысловой синтез (summary) с обязательным указанием источника.

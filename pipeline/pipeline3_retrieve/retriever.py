@@ -61,7 +61,6 @@ def rewrite_patient_query(patient_text: str, max_retries: int = 20) -> str:
     if not api_key:
         raise ValueError("Критическая ошибка: Не задан GOOGLE_API_KEY в окружении.")
 
-    # Используем актуальную рабочую модель (gemini-2.5-flash или gemini-1.5-flash)
     model_name = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
     headers = {"Content-Type": "application/json"}
@@ -136,7 +135,7 @@ def rewrite_patient_query(patient_text: str, max_retries: int = 20) -> str:
     raise RuntimeError(f"❌ Фатальный сбой: нейросеть не ответила после {max_retries} попыток.")
 
 
-def hybrid_search(search_query: str, top_k: int = 20, expand_top_neighbors: int = 3):
+def hybrid_search(search_query: str, top_k: int = 30, expand_top_neighbors: int = 3):
     embed_model, rerank_model = get_models()
 
     outputs = embed_model.encode([search_query], return_dense=True, return_sparse=True)
@@ -148,7 +147,7 @@ def hybrid_search(search_query: str, top_k: int = 20, expand_top_neighbors: int 
         values=[float(v) for v in sparse_dict.values()]
     )
 
-    # 1. Запрос 40 кандидатов в Qdrant
+    # Найди мне топ-80 текстов по смыслу (Dense) И ОДНОВРЕМЕННО найди топ-80 текстов по точным словам (Sparse)
     response = qdrant.query_points(
         collection_name=COLLECTION_NAME,
         prefetch=[
